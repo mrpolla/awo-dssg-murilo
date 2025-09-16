@@ -411,8 +411,8 @@ def process_row(row: InputRow, polite_delay: float=1.0) -> ResultRow:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="data/demo_seed.csv", help="Seed CSV (default: data/demo_seed.csv)")
-    ap.add_argument("--output", default="scraped_results.csv", help="Results CSV")
+    ap.add_argument("--input", default="data/input/demo_seed.csv", help="Seed CSV (default: data/demo_seed.csv)")
+    ap.add_argument("--output", default="data/output/scraped_results.csv", help="Results CSV")
     ap.add_argument("--max", type=int, default=0, help="Limit rows for a test run")
     ap.add_argument("--delay", type=float, default=1.0, help="Polite delay between sites (s)")
     args = ap.parse_args()
