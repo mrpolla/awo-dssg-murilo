@@ -1,8 +1,8 @@
 # AWO Website Checker & Address Scraper
 
-**⚠️ Note: This script is currently inefficient and slow.** It tries multiple extraction strategies and visits many pages per website. Performance optimizations are planned for future versions.
-
 A Python script that validates AWO organization websites and extracts contact information (addresses and emails) from their web pages.
+
+**⚠️ Note: This script is currently inefficient and slow.** It tries multiple extraction strategies and visits many pages per website. Performance optimizations are planned for future versions.
 
 ## What It Does
 
