@@ -43,7 +43,7 @@ HEADERS_ROTATING = [
 
 EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", re.IGNORECASE)
 REQUEST_TIMEOUT = 15
-SAVE_INTERVAL = 20  # Save results every 20 entries
+SAVE_INTERVAL = 2  # Save results every 20 entries
 
 # Street tokens
 STREET_TOKEN = r"(straße|strasse|str\.|weg|allee|platz|ufer|damm|gasse|ring|chaussee|steig|pfad|markt|berg)"
@@ -530,7 +530,7 @@ def main():
                 print(f"\n--- Saving batch of {len(batch_results)} results to {args.output} ---")
                 
                 # Determine if we should append (when resuming) or overwrite
-                append_mode = (not args.force) and os.path.exists(args.output) and total_processed > len(batch_results)
+                append_mode = not (args.force and total_processed == len(batch_results))
                 
                 save_results_incremental(batch_results, args.output, append=append_mode)
                 print(f"Saved {len(batch_results)} results (total processed in this session: {total_processed})")
@@ -566,7 +566,7 @@ def main():
             # Save even after errors, same logic as above
             if len(batch_results) >= SAVE_INTERVAL or i == len(rows_to_process):
                 print(f"\n--- Saving batch of {len(batch_results)} results to {args.output} ---")
-                append_mode = (not args.force) and os.path.exists(args.output) and total_processed > len(batch_results)
+                append_mode = not (args.force and total_processed == len(batch_results))
                 save_results_incremental(batch_results, args.output, append=append_mode)
                 print(f"Saved {len(batch_results)} results (total processed in this session: {total_processed})")
                 batch_results = []
