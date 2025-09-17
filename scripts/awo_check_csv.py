@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 AWO website checker & Impressum/Kontakt scraper with multi-stage address detection.
+Now supports resuming from existing results and incremental saving.
 
 Run:
   python awo_scraper.py
@@ -14,8 +15,9 @@ import random
 import re
 import sys
 import time
+import os
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 import requests
 from bs4 import BeautifulSoup
@@ -41,6 +43,7 @@ HEADERS_ROTATING = [
 
 EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", re.IGNORECASE)
 REQUEST_TIMEOUT = 15
+SAVE_INTERVAL = 20  # Save results every 20 entries
 
 # Street tokens
 STREET_TOKEN = r"(straße|strasse|str\.|weg|allee|platz|ufer|damm|gasse|ring|chaussee|steig|pfad|markt|berg)"
@@ -303,6 +306,71 @@ class ResultRow:
     notes: str
     found_emails: str
 
+# --------------- Resume functionality ---------------
+
+def load_existing_results(output_file: str) -> Set[str]:
+    """Load existing results and return set of already processed IDs."""
+    processed_ids = set()
+    if os.path.exists(output_file):
+        try:
+            with open(output_file, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    processed_ids.add(row.get('id', '').strip())
+            print(f"Found existing results file with {len(processed_ids)} processed entries")
+        except Exception as e:
+            print(f"Warning: Could not read existing results file: {e}")
+    return processed_ids
+
+def save_results_incremental(results_pairs: List[Tuple['InputRow', 'ResultRow']], output_file: str, append: bool = False):
+    """Save results to CSV file."""
+    out_fields = [
+        "id","domain","name","strasse","hausnummer","plz","ort","email",
+        "reachable","http_status","reason",
+        "found_street","found_number","found_plz","found_ort","found_emails",
+        "score_street","score_number","score_plz","score_ort","score_email",
+        "impressum_url","kontakt_url","notes",
+    ]
+    
+    mode = 'a' if append else 'w'
+    write_header = not (append and os.path.exists(output_file) and os.path.getsize(output_file) > 0)
+    
+    with open(output_file, mode, newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=out_fields)
+        if write_header:
+            w.writeheader()
+        
+        for inp, res in results_pairs:
+            row_dict = {
+                # original input fields first
+                "id": inp.id,
+                "domain": inp.domain,
+                "name": inp.name,
+                "strasse": inp.strasse,
+                "hausnummer": inp.hausnummer,
+                "plz": inp.plz,
+                "ort": inp.ort,
+                "email": inp.email,
+                # results
+                "reachable": res.reachable,
+                "http_status": res.http_status,
+                "reason": (res.reason or ""),
+                "found_street": (res.found_street or ""),
+                "found_number": (res.found_number or ""),
+                "found_plz": (res.found_plz or ""),
+                "found_ort": (res.found_ort or ""),
+                "found_emails": (res.found_emails or ""),  # semicolon-separated
+                "score_street": res.score_street,
+                "score_number": res.score_number,
+                "score_plz": res.score_plz,
+                "score_ort": res.score_ort,
+                "score_email": res.score_email,
+                "impressum_url": (res.impressum_url or ""),
+                "kontakt_url": (res.kontakt_url or ""),
+                "notes": (res.notes or ""),
+            }
+            w.writerow(row_dict)
+
 # --------------- Core ---------------
 
 def pick_best_address(candidates: List[Dict[str,str]], seed: InputRow) -> Dict[str,str]:
@@ -388,12 +456,10 @@ def process_row(row: InputRow, polite_delay: float=1.0) -> ResultRow:
         name=row.name,
         input_url=input_url,
         reachable=bool(reachable),
-#        final_url=final_url,
         http_status=code,
         reason=reason,
         impressum_url=impressum_url,
         kontakt_url=kontakt_url,
-#        pages_visited=";".join(pages),
         found_emails=";".join(found_emails),
         found_street=best_addr.get("street"),
         found_number=best_addr.get("number"),
@@ -411,12 +477,14 @@ def process_row(row: InputRow, polite_delay: float=1.0) -> ResultRow:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="data/input/demo_seed.csv", help="Seed CSV (default: data/demo_seed.csv)")
+    ap.add_argument("--input", default="data/input/AWO_domains_with_impressum_data.csv", help="Seed CSV (default: data/demo_seed.csv)")
     ap.add_argument("--output", default="data/output/scraped_results.csv", help="Results CSV")
     ap.add_argument("--max", type=int, default=0, help="Limit rows for a test run")
     ap.add_argument("--delay", type=float, default=1.0, help="Polite delay between sites (s)")
+    ap.add_argument("--force", action="store_true", help="Force restart from beginning (ignore existing results)")
     args = ap.parse_args()
 
+    # Load input data
     rows: List[InputRow] = []
     with open(args.input, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter=",")
@@ -426,83 +494,91 @@ def main():
             print(f"[ERROR] CSV missing columns: {missing}", file=sys.stderr); sys.exit(2)
         for d in reader: rows.append(InputRow.from_dict(d))
 
-    if args.max and args.max > 0: rows = rows[:args.max]
+    print(f"Loaded {len(rows)} total rows from input file")
 
-    results_pairs = []
-    for i, r in enumerate(rows, 1):
-        print(f"[{i}/{len(rows)}] Checking {r.domain} ...")
+    # Check for existing results and filter rows to process
+    if not args.force:
+        processed_ids = load_existing_results(args.output)
+        rows_to_process = [r for r in rows if r.id not in processed_ids]
+        print(f"Skipping {len(processed_ids)} already processed entries")
+        print(f"Will process {len(rows_to_process)} remaining entries")
+    else:
+        rows_to_process = rows
+        print("Force mode: processing all entries from scratch")
+
+    if args.max and args.max > 0: 
+        rows_to_process = rows_to_process[:args.max]
+        print(f"Limited to {len(rows_to_process)} rows for testing")
+
+    if not rows_to_process:
+        print("No new rows to process. All entries are already completed!")
+        return
+
+    # Process rows with incremental saving
+    batch_results = []
+    total_processed = 0
+    
+    for i, r in enumerate(rows_to_process, 1):
+        print(f"[{i}/{len(rows_to_process)}] Checking {r.domain} ...")
         try:
             res = process_row(r, polite_delay=args.delay)
-            results_pairs.append((r, res))
+            batch_results.append((r, res))
+            total_processed += 1
+            
+            # Save every SAVE_INTERVAL results or at the end
+            if len(batch_results) >= SAVE_INTERVAL or i == len(rows_to_process):
+                print(f"\n--- Saving batch of {len(batch_results)} results to {args.output} ---")
+                
+                # Determine if we should append (when resuming) or overwrite
+                append_mode = (not args.force) and os.path.exists(args.output) and total_processed > len(batch_results)
+                
+                save_results_incremental(batch_results, args.output, append=append_mode)
+                print(f"Saved {len(batch_results)} results (total processed in this session: {total_processed})")
+                batch_results = []  # Clear the batch
+                
         except Exception as e:
             print(f"  -> ERROR on {r.domain}: {e}", file=sys.stderr)
             res = ResultRow(
-                    id=r.id,
-                    domain=r.domain,
-                    name=r.name,
-                    input_url=ensure_url(r.domain) or "",
-                    reachable=False,
-                    http_status=None,
-                    reason="exception",
-                    found_street=None,
-                    found_number=None,
-                    found_plz=None,
-                    found_ort=None,
-                    impressum_url=None,
-                    kontakt_url=None,
-                    score_street=0,
-                    score_number=0,
-                    score_plz=0,
-                    score_ort=0,
-                    score_email=0,
-                    notes="exception",
-                    found_emails=""
-                )
-            results_pairs.append((r, res))
+                id=r.id,
+                domain=r.domain,
+                name=r.name,
+                input_url=ensure_url(r.domain) or "",
+                reachable=False,
+                http_status=None,
+                reason="exception",
+                found_street=None,
+                found_number=None,
+                found_plz=None,
+                found_ort=None,
+                impressum_url=None,
+                kontakt_url=None,
+                score_street=0,
+                score_number=0,
+                score_plz=0,
+                score_ort=0,
+                score_email=0,
+                notes="exception",
+                found_emails=""
+            )
+            batch_results.append((r, res))
+            total_processed += 1
+            
+            # Save even after errors, same logic as above
+            if len(batch_results) >= SAVE_INTERVAL or i == len(rows_to_process):
+                print(f"\n--- Saving batch of {len(batch_results)} results to {args.output} ---")
+                append_mode = (not args.force) and os.path.exists(args.output) and total_processed > len(batch_results)
+                save_results_incremental(batch_results, args.output, append=append_mode)
+                print(f"Saved {len(batch_results)} results (total processed in this session: {total_processed})")
+                batch_results = []
+                
         time.sleep(0.2)
 
-    out_fields = [
-    "id","domain","name","strasse","hausnummer","plz","ort","email",
-    "reachable","http_status","reason",
-    "found_street","found_number","found_plz","found_ort","found_emails",
-    "score_street","score_number","score_plz","score_ort","score_email",
-    "impressum_url","kontakt_url","notes",
-    ]
-
-    with open(args.output, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=out_fields)
-        w.writeheader()
-        for inp, res in results_pairs:
-            row_dict = {
-                # original input fields first
-                "id": inp.id,
-                "domain": inp.domain,
-                "name": inp.name,
-                "strasse": inp.strasse,
-                "hausnummer": inp.hausnummer,
-                "plz": inp.plz,
-                "ort": inp.ort,
-                "email": inp.email,
-                # results
-                "reachable": res.reachable,
-                "http_status": res.http_status,
-                "reason": (res.reason or ""),
-                "found_street": (res.found_street or ""),
-                "found_number": (res.found_number or ""),
-                "found_plz": (res.found_plz or ""),
-                "found_ort": (res.found_ort or ""),
-                "found_emails": (res.found_emails or ""),  # semicolon-separated
-                "score_street": res.score_street,
-                "score_number": res.score_number,
-                "score_plz": res.score_plz,
-                "score_ort": res.score_ort,
-                "score_email": res.score_email,
-                "impressum_url": (res.impressum_url or ""),
-                "kontakt_url": (res.kontakt_url or ""),
-                "notes": (res.notes or ""),
-            }
-            w.writerow(row_dict)
-    print(f"\nDone. Wrote {len(results_pairs)} rows to {args.output}")
+    print(f"\nCompleted! Processed {total_processed} new entries in this session.")
+    
+    # Final summary
+    if os.path.exists(args.output):
+        total_in_file = sum(1 for _ in open(args.output, 'r', encoding='utf-8')) - 1  # -1 for header
+        print(f"Total entries now in {args.output}: {total_in_file}")
 
 if __name__ == "__main__":
     main()
