@@ -36,14 +36,42 @@ COMMON_IMPRESSUM_PATHS = [
 ]
 
 HEADERS_ROTATING = [
-    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"},
-    {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15"},
-    {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/124.0"},
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0"
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "de-de",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "de,en-US;q=0.7,en;q=0.3",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
+    }
 ]
 
 EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", re.IGNORECASE)
 REQUEST_TIMEOUT = 15
-SAVE_INTERVAL = 2  # Save results every 20 entries
+SAVE_INTERVAL = 5  # Save results every 5 entries
 
 # Street tokens
 STREET_TOKEN = r"(straße|strasse|str\.|weg|allee|platz|ufer|damm|gasse|ring|chaussee|steig|pfad|markt|berg)"
@@ -385,7 +413,7 @@ def pick_best_address(candidates: List[Dict[str,str]], seed: InputRow) -> Dict[s
         )
     return max(candidates, key=score)
 
-def process_row(row: InputRow, polite_delay: float=1.0) -> ResultRow:
+def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
     input_url = ensure_url(row.domain) or ""
     reachable, final_url, code, reason = site_reachable(input_url) if input_url else (False, None, None, "no-domain")
 
@@ -480,7 +508,7 @@ def main():
     ap.add_argument("--input", default="data/input/AWO_domains_with_impressum_data.csv", help="Seed CSV (default: data/demo_seed.csv)")
     ap.add_argument("--output", default="data/output/scraped_results.csv", help="Results CSV")
     ap.add_argument("--max", type=int, default=0, help="Limit rows for a test run")
-    ap.add_argument("--delay", type=float, default=1.0, help="Polite delay between sites (s)")
+    ap.add_argument("--delay", type=float, default=5.0, help="Polite delay between sites (s)")
     ap.add_argument("--force", action="store_true", help="Force restart from beginning (ignore existing results)")
     args = ap.parse_args()
 
