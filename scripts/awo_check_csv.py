@@ -422,6 +422,11 @@ def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
     impressum_url = None
     kontakt_url = None
     pages: List[str] = []
+    score_street = ""
+    score_number = ""
+    score_plz = ""
+    score_ort = ""
+    score_email = ""
 
     if reachable and final_url:
         soup = html_of(final_url)
@@ -455,24 +460,25 @@ def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
         if kontakt_url: print(f"  kontakt_url: {kontakt_url}")
         time.sleep(polite_delay)
 
-    # choose best email for scoring (case-insensitive)
-    best_email = ""
-    if found_emails:
-        dom = row.domain.split("/")[0].lower()
-        candidates_em = [e for e in found_emails if any(x in e for x in [dom, "awo"])]
-        best_email = candidates_em[0] if candidates_em else found_emails[0]
-    print(f"  collected emails (deduped): {found_emails}")
-
-    score_street = score_similarity(row.strasse, best_addr.get("street") or "")
-    score_number = score_similarity(row.hausnummer, best_addr.get("number") or "")
-    score_plz = score_similarity(row.plz, best_addr.get("plz") or "")
-    score_ort = score_similarity(row.ort, best_addr.get("ort") or "")
-    score_email = score_similarity(row.email.lower(), (best_email or "").lower())
-
     notes_parts = []
     if not reachable:
         notes_parts.append("unreachable")
+        print(f"  site not reachable: {reason}")
     else:
+        # choose best email for scoring (case-insensitive)
+        best_email = ""
+        if found_emails:
+            dom = row.domain.split("/")[0].lower()
+            candidates_em = [e for e in found_emails if any(x in e for x in [dom, "awo"])]
+            best_email = candidates_em[0] if candidates_em else found_emails[0]
+            print(f"  collected emails (deduped): {found_emails}")
+
+        score_street = score_similarity(row.strasse, best_addr.get("street") or "")
+        score_number = score_similarity(row.hausnummer, best_addr.get("number") or "")
+        score_plz = score_similarity(row.plz, best_addr.get("plz") or "")
+        score_ort = score_similarity(row.ort, best_addr.get("ort") or "")
+        score_email = score_similarity(row.email.lower(), (best_email or "").lower())
+
         if score_plz < 60 or score_ort < 60: notes_parts.append("possible-address-change")
         if score_email < 60 and best_email: notes_parts.append("possible-email-change")
         if not found_emails: notes_parts.append("no-email-found")
