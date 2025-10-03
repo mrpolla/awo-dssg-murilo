@@ -25,21 +25,16 @@ An Excel file with (typical) sheets:
 - `Unique_Legal_NamesAddresses` — same for Legal Entities.
 - `Unique_Domain_NamesAddresses` — same for AWO Domains.
 - `AddressToNames` — for each normalized address across _all_ sources, the set of normalized names seen.
-- `OverlapSummary` — counts for all source-combination overlaps.
 
 ## Run
 
-```bash
-python consolidate_lists.py   --fac data/input/2025_09_16_Einrichtunsdatenbank_Export_descriptions_final.xlsx   --ass data/input/2026_09_18_JurPers_Fragebogen2025_descriptions_final.xlsx   --leg data/input/2026_09_18_JurPers_Fragebogen2025_descriptions_final.xlsx   --dom data/input/AWO_domains_with_impressum_data.xlsx   --out data/output/merged_entities.xlsx   --limit 0
-```
+- From within VS Code
 
 ### Key options
 
-- `--limit` _(int, default 0)_: limit rows per source for a quick test (0 = no limit).
-- `--name-thresh` / `--addr-thresh` _(floats)_: optional fuzzy thresholds if enabled in your version.
-- `--address-first` _(flag)_: prefer address-based grouping when available.
+- MAX_PER_SOURCE: limit rows per source for a quick test (None = no limit).
 
-## Normalization (high level)
+## Normalization
 
 - Lowercasing, German umlaut transliteration, punctuation/whitespace squashing.
 - Common legal tokens removed: `gmbh`, `ggmbh`, `mbh`, `ev/e.v.`, `verein`, etc.
@@ -51,4 +46,4 @@ python consolidate_lists.py   --fac data/input/2025_09_16_Einrichtunsdatenbank_E
 
 ## Privacy
 
-Outputs may include _single values_ (unique names, addresses). Share only within approved groups and follow your data-sharing rules.
+**Privacy note (Datenschutz):** the outputs may include _single values_ from the sources (e.g., unique names/addresses). Do not publish raw outputs without checking data-sharing permissions.

@@ -51,3 +51,5 @@ Run directly in VS Code by manually changing the default input file path in the 
 ## Output
 
 Generates CSV with original data plus found addresses, emails, similarity scores, and contact page URLs.
+
+**Privacy note (Datenschutz):** the outputs may include _single values_ from the sources (e.g., unique names/addresses). Do not publish raw outputs without checking data-sharing permissions.
