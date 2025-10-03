@@ -19,12 +19,12 @@ Merge the four AWO sources — **Facilities**, **Associations**, **Legal Entitie
 
 An Excel file with (typical) sheets:
 
-- `MasterEntities` — columns like `EntityID, IsFacility, IsAssociation, IsLegalEntity, IsAWODomain, EntityName, F_names, A_names, L_names, D_names, ...`.
-- `Unique_Facility_NamesAddresses` — list of `(normalized_name, normalized_address)` combos that define Facility uniqueness.
-- `Unique_Association_NamesAddresses` — same for Associations.
-- `Unique_Legal_NamesAddresses` — same for Legal Entities.
-- `Unique_Domain_NamesAddresses` — same for AWO Domains.
-- `AddressToNames` — for each normalized address across _all_ sources, the set of normalized names seen.
+- `Entities` — columns like `EntityID, IsFacility, IsAssociation, IsLegalEntity, IsAWODomain, EntityName, F_names, A_names, L_names, D_names, ...`.
+- `Facilities_unique` — list of `(normalized_name, normalized_address)` combos that define Facility uniqueness.
+- `Associations_unique` — same for Associations.
+- `Legal_unique` — same for Legal Entities.
+- `Domain_unique` — same for AWO Domains.
+- `Addr_Name_Collisions` — for each normalized address across _all_ sources, the set of normalized names seen.
 
 ## Run
 
