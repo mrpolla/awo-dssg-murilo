@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 from itertools import combinations
-
+from unidecode import unidecode
 import pandas as pd
 
 # -------------------- Config --------------------
@@ -36,9 +36,37 @@ OUT_XLSX = OUT_DIR / "deduplicated_entities.xlsx"
 # For quick test runs; set to None for full data
 MAX_PER_SOURCE = None  # e.g., 300
 
+FLAG_COLS = ["IsFacility", "IsAssociation", "IsLegalEntity", "IsAWODomain"]
 
 # -------------------- Helpers: normalization --------------------
 UML = str.maketrans({"ä":"ae","ö":"oe","ü":"ue","Ä":"Ae","Ö":"Oe","Ü":"Ue","ß":"ss"})
+# token aliases
+_NAME_ALIASES = {
+    "arbeiterwohlfahrt": "awo",
+    "ortsverein": "ov",
+    "kreisverband": "kv",
+    "bezirksverband": "bv",
+    "landesverband": "lv",
+    "stadtverband": "stv",
+    "unterbezirk": "ub",
+    "regionalverband": "rv",
+}
+# legal/corporate forms to drop entirely
+_LEGAL_FORM_RE = re.compile(
+    r"""
+    \b(
+        ggmbh|gmbh|mbh|ag|ug|kgaa|kg|ohg|eg|ev|e\.?\s*v\.?|
+        stiftung|verein|gag|eigenbetrieb
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE
+)
+# generic non-identifying words we often want to drop in names
+# (keep this small and careful)
+_GENERIC_RE = re.compile(
+    r"\b(gemeinnuetzig(e|er|en)?|gemeinnützig(e|er|en)?)\b",
+    re.IGNORECASE
+)
 
 def _to_str(x) -> str:
     if x is None:
@@ -67,11 +95,49 @@ def norm_street(s: str) -> str:
     s = re.sub(r"[^\w\s\-]", " ", s)
     return norm_space(s)
 
-def norm_name_strict(s: str) -> str:
-    # keep identity-bearing tokens; just de-umlaut, lowercase, strip punctuation, collapse whitespace
-    s = _to_str(s).translate(UML).lower()
-    s = re.sub(r"[^\w\s\-&']", " ", s)
-    return norm_space(s)
+def norm_name(x: str) -> str:
+    if x is None:
+        return ""
+    t = str(x).strip()
+    if not t:
+        return ""
+
+    # lower + german transliteration (ae/oe/ue/ss)
+    t = t.lower().translate(UML)
+
+    # normalize punctuation
+    t = _clean_punct(t)
+
+    # --- collapse split legal abbreviations BEFORE tokenizing ---
+    # handles "e v", "e. v.", "g g m b h", "g.m.b.h.", etc.
+    t = re.sub(r"\be\s*\.?\s*v\b", "ev", t)
+    t = re.sub(r"\bg\s*\.?\s*g\s*\.?\s*m\s*\.?\s*b\s*\.?\s*h\b", "ggmbh", t)
+    t = re.sub(r"\bg\s*\.?\s*m\s*\.?\s*b\s*\.?\s*h\b", "gmbh", t)
+    t = re.sub(r"\bm\s*\.?\s*b\s*\.?\s*h\b", "mbh", t)
+    # ------------------------------------------------------------
+
+    # tokenize, alias, drop legal forms & generic bits
+    out_tokens = []
+    for tok in t.split():
+        if _LEGAL_FORM_RE.fullmatch(tok):
+            continue
+        if _GENERIC_RE.fullmatch(tok):
+            continue
+        tok = _NAME_ALIASES.get(tok, tok)
+        out_tokens.append(tok)
+
+    if not out_tokens:
+        return ""
+
+    # remove consecutive duplicates while keeping order
+    seen = set()
+    dedup = []
+    for tok in out_tokens:
+        if tok not in seen:
+            dedup.append(tok)
+            seen.add(tok)
+
+    return re.sub(r"\s+", " ", " ".join(dedup)).strip()
 
 def make_addr_key(zip_, city, street) -> str:
     z = norm_zip(zip_)
@@ -82,11 +148,15 @@ def make_addr_key(zip_, city, street) -> str:
         return ""
     return f"{z}|{c}|{st}"
 
-
 def strip_headers(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
+def _clean_punct(s: str) -> str:
+    # unify punctuation/dashes/& and remove the rest
+    s = s.replace("&", " und ")
+    s = re.sub(r"[–—\-_/|+.,:;()\"'´`“”’‚]", " ", s)
+    return s
 
 # -------------------- Loaders --------------------
 def load_facilities(xlsx_path: Path) -> pd.DataFrame:
@@ -99,7 +169,7 @@ def load_facilities(xlsx_path: Path) -> pd.DataFrame:
     out["_source_id"] = "F" + out.index.astype(str)
 
     out["_name"] = out.get("name", "").astype(str)
-    out["_name_norm"] = out["_name"].apply(norm_name_strict)
+    out["_name_norm"] = out["_name"].apply(norm_name)
 
     out["_zip"] = out.get("adresse_plz", "").apply(norm_zip)
     out["_city_norm"] = out.get("adresse_ort", "").apply(norm_city)
@@ -118,7 +188,7 @@ def load_associations(xlsx_path: Path) -> pd.DataFrame:
     out["_source_id"] = "A" + out.index.astype(str)
 
     out["_name"] = out.get("name", "").astype(str)
-    out["_name_norm"] = out["_name"].apply(norm_name_strict)
+    out["_name_norm"] = out["_name"].apply(norm_name)
 
     out["_zip"] = out.get("adresse_plz", "").apply(norm_zip)
     out["_city_norm"] = out.get("adresse_ort", "").apply(norm_city)
@@ -161,7 +231,7 @@ def load_legal(xlsx_path: Path) -> pd.DataFrame:
         if c in out.columns:
             name = name.where(name.astype(str).str.len() > 0, out[c].astype(str))
     out["_name"] = name
-    out["_name_norm"] = out["_name"].apply(norm_name_strict)
+    out["_name_norm"] = out["_name"].apply(norm_name)
 
     # address
     out["_zip"] = out.get("PLZ", "").apply(norm_zip)
@@ -182,7 +252,7 @@ def load_domains(path: Path) -> pd.DataFrame:
 
     nm_col = "name" if "name" in out.columns else ("Name" if "Name" in out.columns else None)
     out["_name"] = out[nm_col].astype(str) if nm_col else ""
-    out["_name_norm"] = out["_name"].apply(norm_name_strict)
+    out["_name_norm"] = out["_name"].apply(norm_name)
 
     # street = strasse + hausnummer
     street_disp = ((out.get("strasse","").astype(str) + " " + out.get("hausnummer","").astype(str)).str.strip())
@@ -360,8 +430,67 @@ def unique_name_address_sheet(df: pd.DataFrame, source: str) -> pd.DataFrame:
     # grp = grp[["Name","ZIP","City","Street","Count"]]
     return grp
 
-FLAG_COLS = ["IsFacility", "IsAssociation", "IsLegalEntity", "IsAWODomain"]
+# -------------------- Unique (address) sheet --------------------
+def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
+    """
+    For every full address key (_addr_key), collect ALL normalized names seen
+    across sources. Keep only addresses that have >1 distinct normalized name.
+    """
+    base = ["_addr_key", "_zip", "_city_norm", "_street_norm", "_name_norm"]
 
+    fac2 = fac[base].assign(_source="Facility")
+    ass2 = ass[base].assign(_source="Association")
+    leg2 = leg[base].assign(_source="LegalEntity")
+    dom2 = dom[base].assign(_source="AWODomain")
+
+    all_df = pd.concat([fac2, ass2, leg2, dom2], ignore_index=True)
+
+    # keep only rows with a complete address key
+    df = all_df[all_df["_addr_key"].astype(str).str.len() > 0].copy()
+
+    # counts per source for each address
+    src_counts = (
+        df.groupby(["_addr_key", "_source"])
+          .size()
+          .unstack(fill_value=0)
+          .reset_index()
+    )
+
+    # aggregate names & basic address info
+    def _uniq_names(s):
+        vals = [str(x).strip() for x in s if str(x).strip()]
+        return " | ".join(sorted(set(vals)))
+
+    def _n_uniq(s):
+        return len(set([str(x).strip() for x in s if str(x).strip()]))
+
+    agg = (
+        df.groupby("_addr_key", as_index=False)
+          .agg(
+              ZIP=("_zip", "first"),
+              City_norm=("_city_norm", "first"),
+              Street_norm=("_street_norm", "first"),
+              Names_norm=("_name_norm", _uniq_names),
+              N_names=("_name_norm", _n_uniq),
+              N_records=("_name_norm", "size"),
+          )
+    )
+
+    out = agg.merge(src_counts, on="_addr_key", how="left")
+    out = out[out["N_names"] > 1]  # only addresses with multiple (normalized) names
+    out = out.sort_values(["N_names", "N_records"], ascending=False).reset_index(drop=True)
+
+    # nice column order (only if they exist)
+    ordered = [
+        "ZIP", "City_norm", "Street_norm",
+        "N_names", "N_records",
+        "Facility", "Association", "LegalEntity", "AWODomain",
+        "Names_norm", "_addr_key",
+    ]
+    existing = [c for c in ordered if c in out.columns]
+    return out[existing]
+
+# -------------------- Summmary: overlap --------------------
 def _normalize_flags(df, flag_cols=FLAG_COLS):
     """Coerce flags to boolean (True/False)."""
     for c in flag_cols:
@@ -482,6 +611,7 @@ def main():
     df_ass_u = unique_name_address_sheet(ass, "Association")
     df_leg_u = unique_name_address_sheet(leg, "LegalEntity")
     df_dom_u = unique_name_address_sheet(dom, "AWODomain")
+    df_addr_name_collisions = address_name_collisions_sheet(fac, ass, leg, dom)
 
     print("\n[4/4] Writing Excel with extra sheets...")
     with pd.ExcelWriter(OUT_XLSX, engine="openpyxl") as xw:
@@ -490,6 +620,8 @@ def main():
         df_ass_u.to_excel(xw, sheet_name="Associations_unique", index=False)
         df_leg_u.to_excel(xw, sheet_name="Legal_unique", index=False)
         df_dom_u.to_excel(xw, sheet_name="Domains_unique", index=False)
+        df_addr_name_collisions.to_excel(xw, sheet_name="Addr_Name_Collisions", index=False)
+
 
     print("\nSummary:")
     print_overlap_report(df_entities, inclusive=False)

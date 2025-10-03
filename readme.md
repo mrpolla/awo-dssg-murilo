@@ -1,53 +1,33 @@
-# AWO Website Checker & Address Scraper
+# AWO Entity Matching & Utilities
 
-A Python script that validates AWO organization websites and extracts contact information (addresses and emails) from their web pages.
+This repository contains two scripts:
 
-**⚠️ Note: This script is currently inefficient and slow.** It tries multiple extraction strategies and visits many pages per website. Performance optimizations are planned for future versions.
+- **consolidate_lists** — merges Facilities, Associations, Legal Entities and AWO Domains into a single, deduplicated _Master Entities_ list (one row per entity), with overlap/summary sheets.
+- **awo_check_csv** — checks addresses and domains from a seed list of AWO domains.
 
-## What It Does
-
-- Checks if websites are reachable
-- Extracts German addresses using multi-stage pattern matching
-- Finds email addresses on main pages and contact/impressum pages
-- Compares found data with existing records and provides similarity scores
-
-## Requirements
+## Quickstart
 
 ```bash
-pip install requests beautifulsoup4 rapidfuzz lxml
-# or
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate  # on Windows: .venv\Scripts\activate
 ```
 
-## Input CSV Format
+### Repo layout
 
-Required columns: `id`, `domain`, `name`, `strasse`, `hausnummer`, `plz`, `ort`, `email`
-
-## Usage
-
-### Basic (uses default paths)
-
-```bash
-python /scripts/awo_check_csv.py
+```
+awo-dssg-murilo/
+├─ README.md
+├─ scripts/
+│  ├─ consolidate_lists/
+│  │  ├─ README.md
+│  │  └─ consolidate_lists.py
+│  └─ awo_check_csv/
+│     ├─ README.md
+│     └─ awo_check_csv.py
+├─ data/
+│  ├─ input/    # place source files here (not committed)
+│  └─ output/   # results (not committed)
+└─ .gitignore
 ```
 
-### Custom input/output
-
-```bash
-python /scripts/awo_check_csv.py --input /data/input/your_file.csv --output results.csv
-```
-
-### From VS Code
-
-Run directly in VS Code by manually changing the default input file path in the script or using the integrated terminal with the above commands.
-
-### Options
-
-- `--input`: Input CSV path (default: `/data/input/demo_seed.csv`)
-- `--output`: Output CSV path (default: `/data/output/scraped_results.csv`)
-- `--max N`: Process only first N rows (for testing)
-- `--delay X`: Seconds between requests (default: 1.0)
-
-## Output
-
-Generates CSV with original data plus found addresses, emails, similarity scores, and contact page URLs.
+**Privacy note (Datenschutz):** the outputs may include _single values_ from the sources (e.g., unique names/addresses). Do not publish raw outputs without checking data-sharing permissions.
