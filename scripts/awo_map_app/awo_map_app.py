@@ -14,12 +14,17 @@ from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import time
 from pathlib import Path
+import pickle
+
+# ==================== CONFIG ====================
+DATA_FILE = Path("data/output/deduplicated_entities.xlsx")
+GEOCODE_CACHE_FILE = Path("../../data/output/geocode_cache.pkl")
+SAMPLE_LIMIT = 1000  # Set to a number for testing, or None for all data
+
+# ================================================
 
 # Page config
 st.set_page_config(page_title="AWO Entities Map", layout="wide")
-
-# File path
-DATA_FILE = Path("data/output/deduplicated_entities.xlsx")
 
 # Color scheme for entity types
 COLORS = {
@@ -40,6 +45,10 @@ def load_data():
         if col in df.columns:
             df[col] = df[col].fillna(False).astype(bool)
     
+    # Apply sample limit if set
+    if SAMPLE_LIMIT is not None and SAMPLE_LIMIT < len(df):
+        df = df.sample(n=SAMPLE_LIMIT, random_state=42)
+    
     return df
 
 @st.cache_data
@@ -48,8 +57,6 @@ def extract_addresses(df):
     addresses = []
     
     for idx, row in df.iterrows():
-        # Try to extract address from different source columns
-        # Priority: Facility > Association > Legal > Domain
         zip_code = ""
         city = ""
         street = ""
@@ -105,48 +112,75 @@ def extract_addresses(df):
     
     return pd.DataFrame(addresses)
 
+def load_geocode_cache():
+    """Load the persistent geocode cache from disk."""
+    if GEOCODE_CACHE_FILE.exists():
+        try:
+            with open(GEOCODE_CACHE_FILE, 'rb') as f:
+                return pickle.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_geocode_cache(cache):
+    """Save the geocode cache to disk."""
+    try:
+        GEOCODE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(GEOCODE_CACHE_FILE, 'wb') as f:
+            pickle.dump(cache, f)
+        return True
+    except Exception:
+        return False
+
 @st.cache_data
 def geocode_addresses(addresses_df):
-    """Geocode unique addresses to get lat/lon coordinates."""
+    """Geocode unique addresses to get lat/lon coordinates with persistent caching."""
     unique_addrs = addresses_df[["addr_key", "full_address"]].drop_duplicates()
     
-    geolocator = Nominatim(user_agent="awo_entity_mapper")
+    # Load existing cache
+    cache = load_geocode_cache()
+    
+    # Filter out already geocoded addresses
+    to_geocode = unique_addrs[~unique_addrs["addr_key"].isin(cache.keys())]
+    
+    if len(to_geocode) == 0:
+        coords = [{"addr_key": k, "lat": v[0], "lon": v[1]} for k, v in cache.items()]
+        return pd.DataFrame(coords)
+    
+    # Initialize geocoder with longer timeout
+    geolocator = Nominatim(user_agent="awo_entity_mapper", timeout=10)
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
     
-    coords = []
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for idx, row in unique_addrs.iterrows():
-        status_text.text(f"Geocoding {idx + 1}/{len(unique_addrs)}: {row['full_address']}")
-        progress_bar.progress((idx + 1) / len(unique_addrs))
+    status_text.text(f"Geocoding {len(to_geocode)} new addresses...")
+    
+    for idx, (_, row) in enumerate(to_geocode.iterrows()):
+        progress_bar.progress((idx + 1) / len(to_geocode))
         
         try:
             location = geocode(row["full_address"] + ", Germany")
             if location:
-                coords.append({
-                    "addr_key": row["addr_key"],
-                    "lat": location.latitude,
-                    "lon": location.longitude
-                })
+                cache[row["addr_key"]] = (location.latitude, location.longitude)
             else:
                 # Try without street if full address fails
                 simple_addr = f"{row['addr_key'].split('|')[0]} {row['addr_key'].split('|')[1]}, Germany"
                 location = geocode(simple_addr)
                 if location:
-                    coords.append({
-                        "addr_key": row["addr_key"],
-                        "lat": location.latitude,
-                        "lon": location.longitude
-                    })
-        except Exception as e:
-            st.warning(f"Could not geocode: {row['full_address']}")
+                    cache[row["addr_key"]] = (location.latitude, location.longitude)
+        except Exception:
             continue
     
     progress_bar.empty()
     status_text.empty()
     
-    return pd.DataFrame(coords)
+    # Save final cache
+    save_geocode_cache(cache)
+    
+    # Return all coords including cached ones
+    all_coords = [{"addr_key": k, "lat": v[0], "lon": v[1]} for k, v in cache.items()]
+    return pd.DataFrame(all_coords)
 
 def get_entity_types(row):
     """Get list of entity types for a given entity."""
@@ -172,25 +206,46 @@ def get_primary_color(types):
 def main():
     st.title("🗺️ AWO Entities Map Viewer")
     
-    # Load data
-    with st.spinner("Loading entity data..."):
-        df_entities = load_data()
+    # SIDEBAR - only filters and legend
+    st.sidebar.header("🔍 Filter by Type")
+    show_facility = st.sidebar.checkbox("🏢 Facilities", value=True)
+    show_association = st.sidebar.checkbox("🤝 Associations", value=True)
+    show_legal = st.sidebar.checkbox("⚖️ Legal Entities", value=True)
+    show_domain = st.sidebar.checkbox("🌐 AWO Domains", value=True)
     
-    st.sidebar.header("Filters")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Legend")
+    for entity_type, color in COLORS.items():
+        st.sidebar.markdown(
+            f"<span style='color:{color}'>●</span> {entity_type}",
+            unsafe_allow_html=True
+        )
     
-    # Entity type filters
-    st.sidebar.subheader("Entity Types")
-    show_facility = st.sidebar.checkbox("🏢 Facilities", value=True, 
-                                        help=f"Color: {COLORS['Facility']}")
-    show_association = st.sidebar.checkbox("🤝 Associations", value=True,
-                                           help=f"Color: {COLORS['Association']}")
-    show_legal = st.sidebar.checkbox("⚖️ Legal Entities", value=True,
-                                     help=f"Color: {COLORS['LegalEntity']}")
-    show_domain = st.sidebar.checkbox("🌐 AWO Domains", value=True,
-                                      help=f"Color: {COLORS['AWODomain']}")
+    # Load ALL data once (not filtered)
+    df_entities = load_data()
     
-    # Filter entities
-    filtered = df_entities.copy()
+    # Extract and geocode ALL addresses once (cached)
+    addresses = extract_addresses(df_entities)
+    
+    if len(addresses) == 0:
+        st.warning("No valid addresses found in entities.")
+        return
+    
+    # Geocode with persistent caching (cached, runs once)
+    coords = geocode_addresses(addresses)
+    
+    if len(coords) == 0:
+        st.warning("No coordinates found for entities.")
+        return
+    
+    # Merge coordinates with addresses and entities
+    data = addresses.merge(coords, on="addr_key", how="inner")
+    data = data.merge(df_entities[["EntityID", "EntityName", "IsFacility", "IsAssociation", 
+                                 "IsLegalEntity", "IsAWODomain"]], 
+                      on="EntityID", how="left")
+    
+    # NOW apply filters for display only
+    filtered = data.copy()
     type_filters = []
     if show_facility:
         type_filters.append(filtered["IsFacility"])
@@ -209,36 +264,10 @@ def main():
     else:
         filtered = pd.DataFrame()
     
-    st.sidebar.metric("Filtered Entities", len(filtered))
+    st.sidebar.metric("Visible Entities", len(filtered))
     
     if len(filtered) == 0:
-        st.warning("No entities match the selected filters.")
-        return
-    
-    # Extract and geocode addresses
-    with st.spinner("Processing addresses..."):
-        addresses = extract_addresses(filtered)
-    
-    if len(addresses) == 0:
-        st.warning("No valid addresses found in filtered entities.")
-        return
-    
-    # Check if we need to geocode
-    if "coords_cache" not in st.session_state:
-        with st.spinner("Geocoding addresses (this may take a few minutes)..."):
-            coords = geocode_addresses(addresses)
-            st.session_state.coords_cache = coords
-    else:
-        coords = st.session_state.coords_cache
-    
-    # Merge coordinates with addresses and entities
-    data = addresses.merge(coords, on="addr_key", how="inner")
-    data = data.merge(filtered[["EntityID", "EntityName", "IsFacility", "IsAssociation", 
-                                 "IsLegalEntity", "IsAWODomain"]], 
-                      on="EntityID", how="left")
-    
-    if len(data) == 0:
-        st.warning("No coordinates found for filtered entities.")
+        st.info("No entities match the selected filters.")
         return
     
     # Create map
@@ -251,7 +280,7 @@ def main():
         m = folium.Map(location=[51.1657, 10.4515], zoom_start=6, tiles="OpenStreetMap")
         
         # Group entities by location
-        location_groups = data.groupby(["lat", "lon", "addr_key"])
+        location_groups = filtered.groupby(["lat", "lon", "addr_key"])
         
         for (lat, lon, addr_key), group in location_groups:
             entity_types = []
@@ -294,9 +323,9 @@ def main():
             clicked_lon = clicked["lng"]
             
             # Find entities at this location
-            location_entities = data[
-                (data["lat"].round(4) == round(clicked_lat, 4)) & 
-                (data["lon"].round(4) == round(clicked_lon, 4))
+            location_entities = filtered[
+                (filtered["lat"].round(4) == round(clicked_lat, 4)) & 
+                (filtered["lon"].round(4) == round(clicked_lon, 4))
             ]
             
             if len(location_entities) > 0:
@@ -314,15 +343,6 @@ def main():
                     st.write("")
         else:
             st.info("👈 Click on a marker on the map to see entity details")
-    
-    # Legend
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Legend")
-    for entity_type, color in COLORS.items():
-        st.sidebar.markdown(
-            f"<span style='color:{color}'>●</span> {entity_type}",
-            unsafe_allow_html=True
-        )
 
 if __name__ == "__main__":
     main()
