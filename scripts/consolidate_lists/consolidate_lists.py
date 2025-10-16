@@ -376,6 +376,25 @@ def build_clusters(fac: pd.DataFrame, ass: pd.DataFrame, leg: pd.DataFrame, dom:
 
     return clusters
 
+def add_entity_ids_to_sources(fac, ass, leg, dom, clusters):
+    """Add EntityID to source dataframes based on cluster membership."""
+    # Build mapping from (source, source_id) to EntityID
+    source_to_entity = {}
+    for cluster in clusters:
+        eid = cluster.cluster_id
+        for src, row in cluster.entities:
+            sid = row.get("_source_id", "")
+            if sid:
+                source_to_entity[(src, sid)] = eid
+    
+    # Add EntityID to each dataframe
+    for df, source_name in [(fac, "Facility"), (ass, "Association"), 
+                             (leg, "LegalEntity"), (dom, "AWODomain")]:
+        df["_entity_id"] = df["_source_id"].apply(
+            lambda sid: source_to_entity.get((source_name, sid), None)
+        )
+    
+    return fac, ass, leg, dom
 
 # -------------------- Unique (name+address) sheets --------------------
 def unique_name_address_sheet(df: pd.DataFrame, source: str) -> pd.DataFrame:
@@ -436,7 +455,7 @@ def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
     For every full address key (_addr_key), collect ALL normalized names seen
     across sources. Keep only addresses that have >1 distinct normalized name.
     """
-    base = ["_addr_key", "_zip", "_city_norm", "_street_norm", "_name_norm"]
+    base = ["_addr_key", "_zip", "_city_norm", "_street_norm", "_name_norm", "_entity_id"] 
 
     fac2 = fac[base].assign(_source="Facility")
     ass2 = ass[base].assign(_source="Association")
@@ -460,6 +479,10 @@ def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
     def _uniq_names(s):
         vals = [str(x).strip() for x in s if str(x).strip()]
         return " | ".join(sorted(set(vals)))
+    
+    def _uniq_entity_ids(s):
+        vals = [int(x) for x in s if pd.notna(x)]
+        return ", ".join(map(str, sorted(set(vals)))) 
 
     def _n_uniq(s):
         return len(set([str(x).strip() for x in s if str(x).strip()]))
@@ -471,6 +494,7 @@ def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
               City_norm=("_city_norm", "first"),
               Street_norm=("_street_norm", "first"),
               Names_norm=("_name_norm", _uniq_names),
+              EntityIDs=("_entity_id", _uniq_entity_ids), 
               N_names=("_name_norm", _n_uniq),
               N_records=("_name_norm", "size"),
           )
@@ -485,7 +509,7 @@ def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
         "ZIP", "City_norm", "Street_norm",
         "N_names", "N_records",
         "Facility", "Association", "LegalEntity", "AWODomain",
-        "Names_norm", "_addr_key",
+        "Names_norm", "EntityIDs", "_addr_key", 
     ]
     existing = [c for c in ordered if c in out.columns]
     return out[existing]
@@ -604,6 +628,8 @@ def main():
     print("\n[2/4] Clustering by (name_norm, addr_key)...")
     clusters = build_clusters(fac, ass, leg, dom)
     print(f"  Unique entities: {len(clusters)}")
+
+    fac, ass, leg, dom = add_entity_ids_to_sources(fac, ass, leg, dom, clusters)
 
     print("\n[3/4] Building output dataframes...")
     df_entities = create_entities_dataframe(clusters)

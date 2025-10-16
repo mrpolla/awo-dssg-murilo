@@ -17,7 +17,7 @@ Merge the four AWO sources — **Facilities**, **Associations**, **Legal Entitie
 
 ## Output
 
-An Excel file with (typical) sheets:
+An Excel file with sheets:
 
 - `Entities` — columns like `EntityID, IsFacility, IsAssociation, IsLegalEntity, IsAWODomain, EntityName, F_names, A_names, L_names, D_names, ...`.
 - `Facilities_unique` — list of `(normalized_name, normalized_address)` combos that define Facility uniqueness.
