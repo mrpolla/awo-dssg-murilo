@@ -80,10 +80,28 @@ def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip())
 
 def norm_zip(z) -> str:
-    z = _to_str(z)
-    z = re.sub(r"\D", "", z)
-    return z
-
+    if z is None:
+        return ""
+    # Handle pandas/numpy NaN
+    if pd.isna(z):
+        return ""
+    
+    # Try to convert to int first (handles float ZIP codes from Excel like 23458.0)
+    try:
+        # Convert to int to remove decimals, then pad to 5 digits with leading zeros
+        zip_int = int(float(z))
+        return str(zip_int).zfill(5)
+    except (ValueError, TypeError):
+        # Fall back to string cleaning for non-numeric cases
+        s = str(z)
+        if s.lower() == "nan":
+            return ""
+        s = re.sub(r"\D", "", s)
+        # Pad to 5 digits if we have any digits
+        if s:
+            return s.zfill(5)
+        return ""
+    
 def norm_city(s: str) -> str:
     s = _to_str(s).translate(UML).lower()
     s = re.sub(r"[^\w\s\-]", " ", s)
@@ -596,17 +614,34 @@ def unique_name_address_sheet(df: pd.DataFrame, source: str) -> pd.DataFrame:
     return grp
 
 # -------------------- Unique (address) sheet --------------------
-def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
+def address_name_collisions_sheet(fac, ass, leg, dom, clusters) -> pd.DataFrame:
     """
     For every full address key (_addr_key), collect ALL normalized names seen
     across sources. Keep only addresses that have >1 distinct normalized name.
     """
-    base = ["_addr_key", "_zip", "_city_norm", "_street_norm", "_name_norm"]
-
+    # Build entity_id mapping
+    source_to_entity = {}
+    for cluster in clusters:
+        eid = cluster.cluster_id
+        for src, row in cluster.entities:
+            sid = row.get("_source_id", "")
+            if sid:
+                source_to_entity[(src, sid)] = eid
+    
+    # Add entity_id to each dataframe
+    base = ["_addr_key", "_zip", "_city_norm", "_street_norm", "_name_norm", "_source_id"]
+    
     fac2 = fac[base].assign(_source="Facility")
+    fac2["_entity_id"] = fac2["_source_id"].apply(lambda sid: source_to_entity.get(("Facility", sid), None))
+    
     ass2 = ass[base].assign(_source="Association")
+    ass2["_entity_id"] = ass2["_source_id"].apply(lambda sid: source_to_entity.get(("Association", sid), None))
+    
     leg2 = leg[base].assign(_source="LegalEntity")
+    leg2["_entity_id"] = leg2["_source_id"].apply(lambda sid: source_to_entity.get(("LegalEntity", sid), None))
+    
     dom2 = dom[base].assign(_source="AWODomain")
+    dom2["_entity_id"] = dom2["_source_id"].apply(lambda sid: source_to_entity.get(("AWODomain", sid), None))
 
     all_df = pd.concat([fac2, ass2, leg2, dom2], ignore_index=True)
 
@@ -625,6 +660,10 @@ def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
     def _uniq_names(s):
         vals = [str(x).strip() for x in s if str(x).strip()]
         return " | ".join(sorted(set(vals)))
+    
+    def _uniq_entity_ids(s):
+        vals = [int(x) for x in s if pd.notna(x)]
+        return ", ".join(map(str, sorted(set(vals))))
 
     def _n_uniq(s):
         return len(set([str(x).strip() for x in s if str(x).strip()]))
@@ -636,6 +675,7 @@ def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
               City_norm=("_city_norm", "first"),
               Street_norm=("_street_norm", "first"),
               Names_norm=("_name_norm", _uniq_names),
+              EntityIDs=("_entity_id", _uniq_entity_ids),
               N_names=("_name_norm", _n_uniq),
               N_records=("_name_norm", "size"),
           )
@@ -650,7 +690,7 @@ def address_name_collisions_sheet(fac, ass, leg, dom) -> pd.DataFrame:
         "ZIP", "City_norm", "Street_norm",
         "N_names", "N_records",
         "Facility", "Association", "LegalEntity", "AWODomain",
-        "Names_norm", "_addr_key",
+        "Names_norm", "EntityIDs", "_addr_key",
     ]
     existing = [c for c in ordered if c in out.columns]
     return out[existing]
@@ -782,7 +822,7 @@ def main():
     df_ass_u = unique_name_address_sheet(ass, "Association")
     df_leg_u = unique_name_address_sheet(leg, "LegalEntity")
     df_dom_u = unique_name_address_sheet(dom, "AWODomain")
-    df_addr_name_collisions = address_name_collisions_sheet(fac, ass, leg, dom)
+    df_addr_name_collisions = address_name_collisions_sheet(fac, ass, leg, dom, clusters)
 
     print("\n[5/5] Writing Excel with all sheets...")
     with pd.ExcelWriter(OUT_XLSX, engine="openpyxl") as xw:
