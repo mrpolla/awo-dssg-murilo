@@ -17,9 +17,17 @@ from pathlib import Path
 import pickle
 
 # ==================== CONFIG ====================
-DATA_FILE = Path("data/output/deduplicated_entities.xlsx")
+# Toggle between Excel and CSV - CSV is much faster for large files
+USE_CSV = True  # Set to False to use Excel
+
+if USE_CSV:
+    ENTITIES_FILE = Path("data/output/entities.csv")
+    ADDRESSES_FILE = Path("data/output/addr_name_collisions.csv")
+else:
+    DATA_FILE = Path("data/output/deduplicated_entities.xlsx")
+
 GEOCODE_CACHE_FILE = Path("../../data/output/geocode_cache.pkl")
-SAMPLE_LIMIT = 100  # Set to a number for testing, or None for all data
+SAMPLE_LIMIT = 20  # Set to a number for testing, or None for all data
 
 # ================================================
 
@@ -36,8 +44,11 @@ COLORS = {
 
 @st.cache_data
 def load_data():
-    """Load the entities data from Excel."""
-    df = pd.read_excel(DATA_FILE, sheet_name="Entities")
+    """Load the entities data from Excel or CSV."""
+    if USE_CSV:
+        df = pd.read_csv(ENTITIES_FILE)
+    else:
+        df = pd.read_excel(DATA_FILE, sheet_name="Entities")
     
     # Ensure boolean flags
     flag_cols = ["IsFacility", "IsAssociation", "IsLegalEntity", "IsAWODomain"]
@@ -79,7 +90,10 @@ def fix_zip_code(zip_val):
 @st.cache_data
 def load_unique_addresses():
     """Load unique addresses from the Addr_Name_Collisions sheet."""
-    df = pd.read_excel(DATA_FILE, sheet_name="Addr_Name_Collisions")
+    if USE_CSV:
+        df = pd.read_csv(ADDRESSES_FILE)
+    else:
+        df = pd.read_excel(DATA_FILE, sheet_name="Addr_Name_Collisions")
     
     # Apply sample limit to addresses if set
     if SAMPLE_LIMIT is not None and SAMPLE_LIMIT < len(df):
