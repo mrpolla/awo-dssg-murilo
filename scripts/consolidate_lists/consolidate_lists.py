@@ -822,23 +822,34 @@ def main():
     df_ass_u = unique_name_address_sheet(ass, "Association")
     df_leg_u = unique_name_address_sheet(leg, "LegalEntity")
     df_dom_u = unique_name_address_sheet(dom, "AWODomain")
-    df_addresses_unique = addresses_unique_sheet(fac, ass, leg, dom, clusters)  # RENAMED
+    df_addresses_unique = addresses_unique_sheet(fac, ass, leg, dom, clusters)
 
-    print("\n[5/5] Writing Excel with all sheets...")
+    print("\n[5/5] Writing Excel and CSV files...")
+    
+    # Write Excel with all sheets
     with pd.ExcelWriter(OUT_XLSX, engine="openpyxl") as xw:
-        df_entities.to_excel(xw, sheet_name="Entities", index=False)
+        df_entities.to_excel(xw, sheet_name="Unique_Entities", index=False)
         df_name_debug.to_excel(xw, sheet_name="Name_Normalization_Debug", index=False)
         df_addr_debug.to_excel(xw, sheet_name="Address_Normalization_Debug", index=False)
         df_fac_u.to_excel(xw, sheet_name="Facilities_unique", index=False)
         df_ass_u.to_excel(xw, sheet_name="Associations_unique", index=False)
         df_leg_u.to_excel(xw, sheet_name="Legal_unique", index=False)
         df_dom_u.to_excel(xw, sheet_name="Domains_unique", index=False)
-        df_addresses_unique.to_excel(xw, sheet_name="Addresses_Unique", index=False)  # RENAMED
+        df_addresses_unique.to_excel(xw, sheet_name="Unique_Addresses", index=False)
+
+    # Write CSV files
+    csv_entities = OUT_DIR / "unique_entities.csv"
+    csv_addresses = OUT_DIR / "unique_addresses.csv"
+    
+    df_entities.to_csv(csv_entities, index=False)
+    df_addresses_unique.to_csv(csv_addresses, index=False)
 
     print("\nSummary:")
     print_overlap_report(df_entities, inclusive=False)
 
     print(f"\n✓ Wrote {OUT_XLSX}")
+    print(f"✓ Wrote {csv_entities}")
+    print(f"✓ Wrote {csv_addresses}")
     print("="*80)
     print("Done.")
 

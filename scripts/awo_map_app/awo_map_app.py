@@ -3,31 +3,17 @@
 
 """
 Streamlit app to visualize AWO entities on a map of Germany.
-Filters by entity type and shows details when clicking on locations.
+Loads pre-geocoded data and displays with interactive filters.
 """
 
 import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
-import time
 from pathlib import Path
-import pickle
 
 # ==================== CONFIG ====================
-# Toggle between Excel and CSV - CSV is much faster for large files
-USE_CSV = True  # Set to False to use Excel
-
-if USE_CSV:
-    ENTITIES_FILE = Path("data/output/entities.csv")
-    ADDRESSES_FILE = Path("data/output/addr_name_collisions.csv")
-else:
-    DATA_FILE = Path("data/output/deduplicated_entities.xlsx")
-
-GEOCODE_CACHE_FILE = Path("../../data/output/geocode_cache.pkl")
-SAMPLE_LIMIT = 20  # Set to a number for testing, or None for all data
+DEFAULT_GEOCODED_FILE = Path("data/output/awo_entities_geocoded_complete.csv")
 
 # ================================================
 
@@ -43,187 +29,34 @@ COLORS = {
 }
 
 @st.cache_data
-def load_data():
-    """Load the entities data from Excel or CSV."""
-    if USE_CSV:
-        df = pd.read_csv(ENTITIES_FILE)
-    else:
-        df = pd.read_excel(DATA_FILE, sheet_name="Entities")
-    
-    # Ensure boolean flags
-    flag_cols = ["IsFacility", "IsAssociation", "IsLegalEntity", "IsAWODomain"]
-    for col in flag_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna(False).astype(bool)
-    
-    # No sample limit here - we load all entities and filter by addresses
-    return df
-
-def fix_zip_code(zip_val):
-    """Fix ZIP code formatting - ensure 5 digits, pad with 0 if needed."""
-    if pd.isna(zip_val):
-        return None
-    
-    # Convert to string and remove .0 if present
-    zip_str = str(zip_val).strip()
-    if zip_str.endswith('.0'):
-        zip_str = zip_str[:-2]
-    
-    # Remove any non-digit characters
-    zip_str = ''.join(c for c in zip_str if c.isdigit())
-    
-    if not zip_str:
-        return None
-    
-    # Pad with leading zeros to make 5 digits
-    zip_str = zip_str.zfill(5)
-    
-    # German ZIP codes are exactly 5 digits
-    if len(zip_str) == 5:
-        return zip_str
-    elif len(zip_str) > 5:
-        # Take first 5 digits if too long
-        return zip_str[:5]
-    else:
-        return None
-
-@st.cache_data
-def load_unique_addresses():
-    """Load unique addresses from the Addr_Name_Collisions sheet."""
-    if USE_CSV:
-        df = pd.read_csv(ADDRESSES_FILE)
-    else:
-        df = pd.read_excel(DATA_FILE, sheet_name="Addr_Name_Collisions")
-    
-    # Apply sample limit to addresses if set
-    if SAMPLE_LIMIT is not None and SAMPLE_LIMIT < len(df):
-        df = df.sample(n=SAMPLE_LIMIT, random_state=42)
-    
-    addresses = []
-    for idx, row in df.iterrows():
-        # Fix ZIP code
-        zip_code = fix_zip_code(row.get("ZIP"))
-        if not zip_code:
-            continue
-        
-        city = str(row.get("City_norm", "")).strip()
-        street = str(row.get("Street_norm", "")).strip()
-        
-        if not city or city == "nan":
-            continue
-        
-        # Parse EntityIDs (comma-separated) - keep as STRING for caching
-        entity_ids_str = str(row.get("EntityIDs", "")).strip()
-        if entity_ids_str and entity_ids_str != "nan":
-            # Store as comma-separated string, not list
-            entity_ids = entity_ids_str
-            n_entities = len([x for x in entity_ids_str.split(",") if x.strip()])
-        else:
-            entity_ids = ""
-            n_entities = 0
-        
-        addr_key = f"{zip_code}|{city}|{street}" if street and street != "nan" else f"{zip_code}|{city}|"
-        full_address = f"{street}, {zip_code} {city}" if street and street != "nan" else f"{zip_code} {city}"
-        
-        addresses.append({
-            "zip": zip_code,
-            "city": city,
-            "street": street if street != "nan" else "",
-            "addr_key": addr_key,
-            "full_address": full_address,
-            "entity_ids_str": entity_ids,  # String, not list
-            "n_entities": n_entities
-        })
-    
-    return pd.DataFrame(addresses)
-
-def load_geocode_cache():
-    """Load the persistent geocode cache from disk."""
-    if GEOCODE_CACHE_FILE.exists():
-        try:
-            with open(GEOCODE_CACHE_FILE, 'rb') as f:
-                return pickle.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_geocode_cache(cache):
-    """Save the geocode cache to disk."""
+def load_geocoded_data(file_path=None, uploaded_file=None):
+    """Load pre-geocoded data from CSV file."""
     try:
-        GEOCODE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(GEOCODE_CACHE_FILE, 'wb') as f:
-            pickle.dump(cache, f)
-        return True
-    except Exception:
-        return False
-
-@st.cache_data
-def geocode_addresses(addresses_df):
-    """Geocode unique addresses to get lat/lon coordinates with persistent caching."""
-    # Only use columns needed for geocoding (avoid unhashable lists)
-    geocode_df = addresses_df[["addr_key", "full_address", "zip", "city"]].copy()
-    
-    # Load existing cache
-    cache = load_geocode_cache()
-    
-    # Load or initialize failed addresses log
-    failed_log = {}
-    
-    # Filter out already geocoded addresses
-    to_geocode = geocode_df[~geocode_df["addr_key"].isin(cache.keys())]
-    
-    if len(to_geocode) == 0:
-        coords = [{"addr_key": k, "lat": v[0], "lon": v[1]} for k, v in cache.items()]
-        return pd.DataFrame(coords), failed_log
-    
-    # Initialize geocoder with longer timeout
-    geolocator = Nominatim(user_agent="awo_entity_mapper", timeout=10)
-    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    status_text.text(f"Geocoding {len(to_geocode)} new addresses...")
-    
-    success_count = 0
-    fail_count = 0
-    
-    for idx, (_, row) in enumerate(to_geocode.iterrows()):
-        progress_bar.progress((idx + 1) / len(to_geocode))
+        if uploaded_file is not None:
+            df = pd.read_csv(uploaded_file)
+        elif file_path is not None:
+            df = pd.read_csv(file_path)
+        else:
+            return None
         
-        try:
-            location = geocode(row["full_address"] + ", Germany")
-            if location:
-                cache[row["addr_key"]] = (location.latitude, location.longitude)
-                success_count += 1
-            else:
-                # Try without street if full address fails
-                simple_addr = f"{row['zip']} {row['city']}, Germany"
-                location = geocode(simple_addr)
-                if location:
-                    cache[row["addr_key"]] = (location.latitude, location.longitude)
-                    success_count += 1
-                else:
-                    failed_log[row["addr_key"]] = {"address": row["full_address"], "reason": "Not found"}
-                    fail_count += 1
-        except Exception as e:
-            failed_log[row["addr_key"]] = {"address": row["full_address"], "reason": str(e)}
-            fail_count += 1
-            continue
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    # Show summary
-    if success_count > 0 or fail_count > 0:
-        st.info(f"✓ Geocoded {success_count} | ✗ Failed {fail_count}")
-    
-    # Save final cache
-    save_geocode_cache(cache)
-    
-    # Return all coords including cached ones
-    all_coords = [{"addr_key": k, "lat": v[0], "lon": v[1]} for k, v in cache.items()]
-    return pd.DataFrame(all_coords), failed_log
+        # Ensure boolean columns are proper booleans
+        for col in ["IsFacility", "IsAssociation", "IsLegalEntity", "IsAWODomain"]:
+            if col in df.columns:
+                df[col] = df[col].fillna(False).astype(bool)
+        
+        # Verify required columns exist
+        required_cols = ["lat", "lon", "addr_key", "EntityID", "EntityName", "full_address"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            st.error(f"❌ Missing required columns: {', '.join(missing_cols)}")
+            return None
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"❌ Error loading file: {str(e)}")
+        return None
 
 def get_entity_types(row):
     """Get list of entity types for a given entity."""
@@ -246,65 +79,8 @@ def get_primary_color(types):
             return COLORS[t]
     return "#95a5a6"  # gray fallback
 
-def main():
-    st.title("🗺️ AWO Entities Map Viewer")
-    
-    # Load entity data
-    df_entities = load_data()
-    
-    # Load unique addresses from Addr_Name_Collisions sheet
-    addresses = load_unique_addresses()
-    
-    if len(addresses) == 0:
-        st.warning("No valid addresses found in Addr_Name_Collisions sheet.")
-        return
-    
-    # Geocode unique addresses (cached, runs once)
-    coords, failed_log = geocode_addresses(addresses)
-    
-    # EXPORT SECTION - at the top for visibility
-    st.success(f"✓ Geocoded {len(coords)} / {len(addresses)} unique addresses")
-    
-    col_export1, col_export2, col_export3 = st.columns([1, 1, 1])
-    
-    with col_export1:
-        if len(coords) > 0:
-            export_data = addresses.merge(coords, on="addr_key", how="inner")
-            # entity_ids_str is already a string, ready for export
-            csv = export_data.to_csv(index=False)
-            st.download_button(
-                label="📥 Download Geocoded Data",
-                data=csv,
-                file_name="geocoded_addresses.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-    
-    with col_export2:
-        if len(failed_log) > 0:
-            failed_df = pd.DataFrame([
-                {"Address": v["address"], "Reason": v["reason"]} 
-                for k, v in failed_log.items()
-            ])
-            failed_csv = failed_df.to_csv(index=False)
-            st.download_button(
-                label=f"📥 Failed Addresses ({len(failed_log)})",
-                data=failed_csv,
-                file_name="failed_geocoding.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-    
-    with col_export3:
-        if len(failed_log) > 0:
-            with st.expander("View Failed Addresses"):
-                failed_df = pd.DataFrame([
-                    {"Address": v["address"], "Reason": v["reason"]} 
-                    for k, v in failed_log.items()
-                ])
-                st.dataframe(failed_df, use_container_width=True)
-    
-    st.markdown("---")
+def show_map(data_expanded):
+    """Display the map with filters and entity details."""
     
     # SIDEBAR - filters and legend
     st.sidebar.header("🔍 Filter by Type")
@@ -320,33 +96,6 @@ def main():
             f"<span style='color:{color}'>●</span> {entity_type}",
             unsafe_allow_html=True
         )
-    
-    if len(coords) == 0:
-        st.warning("No coordinates found for addresses.")
-        return
-    
-    # Merge coordinates with addresses
-    data = addresses.merge(coords, on="addr_key", how="inner")
-    
-    if len(data) == 0:
-        st.warning("No coordinates found for addresses.")
-        return
-    
-    # Expand data: one row per entity (explode the entity_ids list)
-    # First convert entity_ids_str back to list of integers
-    data["entity_ids"] = data["entity_ids_str"].apply(
-        lambda x: [int(eid.strip()) for eid in str(x).split(",") if eid.strip()] if x else []
-    )
-    data_expanded = data.explode("entity_ids").rename(columns={"entity_ids": "EntityID"})
-    data_expanded = data_expanded[data_expanded["EntityID"].notna()]
-    data_expanded["EntityID"] = data_expanded["EntityID"].astype(int)
-    
-    # Join with entity data to get entity details and type flags
-    data_expanded = data_expanded.merge(
-        df_entities[["EntityID", "EntityName", "IsFacility", "IsAssociation", "IsLegalEntity", "IsAWODomain"]], 
-        on="EntityID", 
-        how="left"
-    )
     
     # Apply filters
     filtered = data_expanded.copy()
@@ -383,6 +132,14 @@ def main():
         # Center map on Germany
         m = folium.Map(location=[51.1657, 10.4515], zoom_start=6, tiles="OpenStreetMap")
         
+        # Create dict of active filters for dynamic coloring
+        active_filters = {
+            "Facility": show_facility,
+            "Association": show_association,
+            "LegalEntity": show_legal,
+            "AWODomain": show_domain
+        }
+        
         # Group entities by location
         location_groups = filtered.groupby(["lat", "lon", "addr_key"])
         
@@ -391,6 +148,13 @@ def main():
             for _, row in group.iterrows():
                 entity_types.extend(get_entity_types(row))
             entity_types = list(set(entity_types))
+            
+            # FILTER entity types to only include active/checked ones
+            entity_types_active = [t for t in entity_types if active_filters.get(t, False)]
+            
+            # Skip if no active types (shouldn't happen due to filtering, but safety check)
+            if not entity_types_active:
+                continue
             
             # Create popup content
             popup_html = f"<b>{group.iloc[0]['full_address']}</b><br>"
@@ -402,8 +166,8 @@ def main():
                 popup_html += f"• {row['EntityName']}<br>"
                 popup_html += f"  <i>({type_str})</i><br>"
             
-            # Add marker with primary color
-            color = get_primary_color(entity_types)
+            # Get color based on ACTIVE types only
+            color = get_primary_color(entity_types_active)
             folium.CircleMarker(
                 location=[lat, lon],
                 radius=8,
@@ -447,6 +211,64 @@ def main():
                     st.write("")
         else:
             st.info("👈 Click on a marker on the map to see entity details")
+
+def main():
+    st.title("🗺️ AWO Entities Map Viewer")
+    
+    # Initialize session state
+    if "data_loaded" not in st.session_state:
+        st.session_state.data_loaded = False
+        st.session_state.data = None
+    
+    # If data not loaded yet, show load options
+    if not st.session_state.data_loaded:
+        st.markdown("### Load geocoded data:")
+        
+        # Check if default file exists
+        default_exists = DEFAULT_GEOCODED_FILE.exists()
+        
+        if default_exists:
+            st.info(f"📂 Found default file: `{DEFAULT_GEOCODED_FILE}`")
+            if st.button("📥 Load Default File", type="primary"):
+                with st.spinner("Loading..."):
+                    data = load_geocoded_data(file_path=DEFAULT_GEOCODED_FILE)
+                    if data is not None:
+                        st.success(f"✓ Loaded {len(data)} entities from {len(data[['lat', 'lon', 'addr_key']].drop_duplicates())} unique addresses")
+                        st.session_state.data = data
+                        st.session_state.data_loaded = True
+                        st.rerun()
+        
+        st.markdown("**Or upload your own file:**")
+        uploaded_file = st.file_uploader(
+            "Upload geocoded CSV file",
+            type=["csv"],
+            help="Upload a complete geocoded CSV file (e.g., awo_entities_geocoded_complete.csv)"
+        )
+        
+        if uploaded_file is not None:
+            with st.spinner("Loading file..."):
+                data = load_geocoded_data(uploaded_file=uploaded_file)
+                if data is not None:
+                    st.success(f"✓ Loaded {len(data)} entities from {len(data[['lat', 'lon', 'addr_key']].drop_duplicates())} unique addresses")
+                    st.session_state.data = data
+                    st.session_state.data_loaded = True
+                    st.rerun()
+        
+        if not default_exists:
+            st.warning("⚠️ No default geocoded file found. Please upload a file or run `geocode_addresses.py` first.")
+    
+    # If data is loaded, show the map
+    else:
+        # Add reset button in sidebar
+        if st.sidebar.button("🔄 Load Different File"):
+            st.session_state.data_loaded = False
+            st.session_state.data = None
+            st.rerun()
+        
+        st.sidebar.markdown("---")
+        
+        # Show the map
+        show_map(st.session_state.data)
 
 if __name__ == "__main__":
     main()
