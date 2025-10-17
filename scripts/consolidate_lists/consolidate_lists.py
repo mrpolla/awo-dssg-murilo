@@ -614,10 +614,10 @@ def unique_name_address_sheet(df: pd.DataFrame, source: str) -> pd.DataFrame:
     return grp
 
 # -------------------- Unique (address) sheet --------------------
-def address_name_collisions_sheet(fac, ass, leg, dom, clusters) -> pd.DataFrame:
+def addresses_unique_sheet(fac, ass, leg, dom, clusters) -> pd.DataFrame:
     """
-    For every full address key (_addr_key), collect ALL normalized names seen
-    across sources. Keep only addresses that have >1 distinct normalized name.
+    For every full address key (_addr_key), collect ALL normalized names and entity IDs.
+    Shows ALL addresses, not just collisions.
     """
     # Build entity_id mapping
     source_to_entity = {}
@@ -682,7 +682,7 @@ def address_name_collisions_sheet(fac, ass, leg, dom, clusters) -> pd.DataFrame:
     )
 
     out = agg.merge(src_counts, on="_addr_key", how="left")
-    out = out[out["N_names"] > 1]  # only addresses with multiple (normalized) names
+    # REMOVED: out = out[out["N_names"] > 1]  # Now showing ALL addresses
     out = out.sort_values(["N_names", "N_records"], ascending=False).reset_index(drop=True)
 
     # nice column order (only if they exist)
@@ -822,7 +822,7 @@ def main():
     df_ass_u = unique_name_address_sheet(ass, "Association")
     df_leg_u = unique_name_address_sheet(leg, "LegalEntity")
     df_dom_u = unique_name_address_sheet(dom, "AWODomain")
-    df_addr_name_collisions = address_name_collisions_sheet(fac, ass, leg, dom, clusters)
+    df_addresses_unique = addresses_unique_sheet(fac, ass, leg, dom, clusters)  # RENAMED
 
     print("\n[5/5] Writing Excel with all sheets...")
     with pd.ExcelWriter(OUT_XLSX, engine="openpyxl") as xw:
@@ -833,8 +833,7 @@ def main():
         df_ass_u.to_excel(xw, sheet_name="Associations_unique", index=False)
         df_leg_u.to_excel(xw, sheet_name="Legal_unique", index=False)
         df_dom_u.to_excel(xw, sheet_name="Domains_unique", index=False)
-        df_addr_name_collisions.to_excel(xw, sheet_name="Addr_Name_Collisions", index=False)
-
+        df_addresses_unique.to_excel(xw, sheet_name="Addresses_Unique", index=False)  # RENAMED
 
     print("\nSummary:")
     print_overlap_report(df_entities, inclusive=False)
