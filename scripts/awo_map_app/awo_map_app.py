@@ -19,7 +19,7 @@ import pickle
 # ==================== CONFIG ====================
 DATA_FILE = Path("data/output/deduplicated_entities.xlsx")
 GEOCODE_CACHE_FILE = Path("../../data/output/geocode_cache.pkl")
-SAMPLE_LIMIT = 1000  # Set to a number for testing, or None for all data
+SAMPLE_LIMIT = 100  # Set to a number for testing, or None for all data
 
 # ================================================
 
@@ -45,70 +45,81 @@ def load_data():
         if col in df.columns:
             df[col] = df[col].fillna(False).astype(bool)
     
-    # Apply sample limit if set
+    # No sample limit here - we load all entities and filter by addresses
+    return df
+
+def fix_zip_code(zip_val):
+    """Fix ZIP code formatting - ensure 5 digits, pad with 0 if needed."""
+    if pd.isna(zip_val):
+        return None
+    
+    # Convert to string and remove .0 if present
+    zip_str = str(zip_val).strip()
+    if zip_str.endswith('.0'):
+        zip_str = zip_str[:-2]
+    
+    # Remove any non-digit characters
+    zip_str = ''.join(c for c in zip_str if c.isdigit())
+    
+    if not zip_str:
+        return None
+    
+    # Pad with leading zeros to make 5 digits
+    zip_str = zip_str.zfill(5)
+    
+    # German ZIP codes are exactly 5 digits
+    if len(zip_str) == 5:
+        return zip_str
+    elif len(zip_str) > 5:
+        # Take first 5 digits if too long
+        return zip_str[:5]
+    else:
+        return None
+
+@st.cache_data
+def load_unique_addresses():
+    """Load unique addresses from the Addr_Name_Collisions sheet."""
+    df = pd.read_excel(DATA_FILE, sheet_name="Addr_Name_Collisions")
+    
+    # Apply sample limit to addresses if set
     if SAMPLE_LIMIT is not None and SAMPLE_LIMIT < len(df):
         df = df.sample(n=SAMPLE_LIMIT, random_state=42)
     
-    return df
-
-@st.cache_data
-def extract_addresses(df):
-    """Extract unique addresses from the entity data."""
     addresses = []
-    
     for idx, row in df.iterrows():
-        zip_code = ""
-        city = ""
-        street = ""
+        # Fix ZIP code
+        zip_code = fix_zip_code(row.get("ZIP"))
+        if not zip_code:
+            continue
         
-        # Extract from available source columns
-        for prefix in ["F_", "A_", "L_"]:
-            if not zip_code:
-                plz_col = f"{prefix}adresse_plz" if prefix != "L_" else "L_PLZ"
-                if plz_col in df.columns:
-                    val = str(row.get(plz_col, "")).strip()
-                    if val and val != "nan":
-                        zip_code = val
-            
-            if not city:
-                city_col = f"{prefix}adresse_ort" if prefix != "L_" else "L_Ort"
-                if city_col in df.columns:
-                    val = str(row.get(city_col, "")).strip()
-                    if val and val != "nan":
-                        city = val
-            
-            if not street:
-                street_col = f"{prefix}adresse_strasse" if prefix != "L_" else "L_Straße + Hausnr."
-                if street_col in df.columns:
-                    val = str(row.get(street_col, "")).strip()
-                    if val and val != "nan":
-                        street = val
+        city = str(row.get("City_norm", "")).strip()
+        street = str(row.get("Street_norm", "")).strip()
         
-        # Try domain columns
-        if not zip_code and "D_plz" in df.columns:
-            val = str(row.get("D_plz", "")).strip()
-            if val and val != "nan":
-                zip_code = val
-        if not city and "D_ort" in df.columns:
-            val = str(row.get("D_ort", "")).strip()
-            if val and val != "nan":
-                city = val
-        if not street and "D_strasse" in df.columns:
-            street_val = str(row.get("D_strasse", "")).strip()
-            house_val = str(row.get("D_hausnummer", "")).strip()
-            if street_val and street_val != "nan":
-                street = f"{street_val} {house_val}".strip()
+        if not city or city == "nan":
+            continue
         
-        if zip_code and city:
-            addr_key = f"{zip_code}|{city}|{street}"
-            addresses.append({
-                "EntityID": row["EntityID"],
-                "zip": zip_code,
-                "city": city,
-                "street": street,
-                "addr_key": addr_key,
-                "full_address": f"{street}, {zip_code} {city}" if street else f"{zip_code} {city}"
-            })
+        # Parse EntityIDs (comma-separated) - keep as STRING for caching
+        entity_ids_str = str(row.get("EntityIDs", "")).strip()
+        if entity_ids_str and entity_ids_str != "nan":
+            # Store as comma-separated string, not list
+            entity_ids = entity_ids_str
+            n_entities = len([x for x in entity_ids_str.split(",") if x.strip()])
+        else:
+            entity_ids = ""
+            n_entities = 0
+        
+        addr_key = f"{zip_code}|{city}|{street}" if street and street != "nan" else f"{zip_code}|{city}|"
+        full_address = f"{street}, {zip_code} {city}" if street and street != "nan" else f"{zip_code} {city}"
+        
+        addresses.append({
+            "zip": zip_code,
+            "city": city,
+            "street": street if street != "nan" else "",
+            "addr_key": addr_key,
+            "full_address": full_address,
+            "entity_ids_str": entity_ids,  # String, not list
+            "n_entities": n_entities
+        })
     
     return pd.DataFrame(addresses)
 
@@ -135,7 +146,8 @@ def save_geocode_cache(cache):
 @st.cache_data
 def geocode_addresses(addresses_df):
     """Geocode unique addresses to get lat/lon coordinates with persistent caching."""
-    unique_addrs = addresses_df[["addr_key", "full_address"]].drop_duplicates()
+    # Only use columns needed for geocoding (avoid unhashable lists)
+    geocode_df = addresses_df[["addr_key", "full_address", "zip", "city"]].copy()
     
     # Load existing cache
     cache = load_geocode_cache()
@@ -144,7 +156,7 @@ def geocode_addresses(addresses_df):
     failed_log = {}
     
     # Filter out already geocoded addresses
-    to_geocode = unique_addrs[~unique_addrs["addr_key"].isin(cache.keys())]
+    to_geocode = geocode_df[~geocode_df["addr_key"].isin(cache.keys())]
     
     if len(to_geocode) == 0:
         coords = [{"addr_key": k, "lat": v[0], "lon": v[1]} for k, v in cache.items()]
@@ -172,7 +184,7 @@ def geocode_addresses(addresses_df):
                 success_count += 1
             else:
                 # Try without street if full address fails
-                simple_addr = f"{row['addr_key'].split('|')[0]} {row['addr_key'].split('|')[1]}, Germany"
+                simple_addr = f"{row['zip']} {row['city']}, Germany"
                 location = geocode(simple_addr)
                 if location:
                     cache[row["addr_key"]] = (location.latitude, location.longitude)
@@ -223,7 +235,64 @@ def get_primary_color(types):
 def main():
     st.title("🗺️ AWO Entities Map Viewer")
     
-    # SIDEBAR - only filters and legend
+    # Load entity data
+    df_entities = load_data()
+    
+    # Load unique addresses from Addr_Name_Collisions sheet
+    addresses = load_unique_addresses()
+    
+    if len(addresses) == 0:
+        st.warning("No valid addresses found in Addr_Name_Collisions sheet.")
+        return
+    
+    # Geocode unique addresses (cached, runs once)
+    coords, failed_log = geocode_addresses(addresses)
+    
+    # EXPORT SECTION - at the top for visibility
+    st.success(f"✓ Geocoded {len(coords)} / {len(addresses)} unique addresses")
+    
+    col_export1, col_export2, col_export3 = st.columns([1, 1, 1])
+    
+    with col_export1:
+        if len(coords) > 0:
+            export_data = addresses.merge(coords, on="addr_key", how="inner")
+            # entity_ids_str is already a string, ready for export
+            csv = export_data.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Geocoded Data",
+                data=csv,
+                file_name="geocoded_addresses.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    
+    with col_export2:
+        if len(failed_log) > 0:
+            failed_df = pd.DataFrame([
+                {"Address": v["address"], "Reason": v["reason"]} 
+                for k, v in failed_log.items()
+            ])
+            failed_csv = failed_df.to_csv(index=False)
+            st.download_button(
+                label=f"📥 Failed Addresses ({len(failed_log)})",
+                data=failed_csv,
+                file_name="failed_geocoding.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    
+    with col_export3:
+        if len(failed_log) > 0:
+            with st.expander("View Failed Addresses"):
+                failed_df = pd.DataFrame([
+                    {"Address": v["address"], "Reason": v["reason"]} 
+                    for k, v in failed_log.items()
+                ])
+                st.dataframe(failed_df, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # SIDEBAR - filters and legend
     st.sidebar.header("🔍 Filter by Type")
     show_facility = st.sidebar.checkbox("🏢 Facilities", value=True)
     show_association = st.sidebar.checkbox("🤝 Associations", value=True)
@@ -238,31 +307,35 @@ def main():
             unsafe_allow_html=True
         )
     
-    # Load ALL data once (not filtered)
-    df_entities = load_data()
-    
-    # Extract and geocode ALL addresses once (cached)
-    addresses = extract_addresses(df_entities)
-    
-    if len(addresses) == 0:
-        st.warning("No valid addresses found in entities.")
-        return
-    
-    # Geocode with persistent caching (cached, runs once)
-    coords, failed_log = geocode_addresses(addresses)
-    
     if len(coords) == 0:
-        st.warning("No coordinates found for entities.")
+        st.warning("No coordinates found for addresses.")
         return
     
-    # Merge coordinates with addresses and entities
+    # Merge coordinates with addresses
     data = addresses.merge(coords, on="addr_key", how="inner")
-    data = data.merge(df_entities[["EntityID", "EntityName", "IsFacility", "IsAssociation", 
-                                 "IsLegalEntity", "IsAWODomain"]], 
-                      on="EntityID", how="left")
     
-    # NOW apply filters for display only
-    filtered = data.copy()
+    if len(data) == 0:
+        st.warning("No coordinates found for addresses.")
+        return
+    
+    # Expand data: one row per entity (explode the entity_ids list)
+    # First convert entity_ids_str back to list of integers
+    data["entity_ids"] = data["entity_ids_str"].apply(
+        lambda x: [int(eid.strip()) for eid in str(x).split(",") if eid.strip()] if x else []
+    )
+    data_expanded = data.explode("entity_ids").rename(columns={"entity_ids": "EntityID"})
+    data_expanded = data_expanded[data_expanded["EntityID"].notna()]
+    data_expanded["EntityID"] = data_expanded["EntityID"].astype(int)
+    
+    # Join with entity data to get entity details and type flags
+    data_expanded = data_expanded.merge(
+        df_entities[["EntityID", "EntityName", "IsFacility", "IsAssociation", "IsLegalEntity", "IsAWODomain"]], 
+        on="EntityID", 
+        how="left"
+    )
+    
+    # Apply filters
+    filtered = data_expanded.copy()
     type_filters = []
     if show_facility:
         type_filters.append(filtered["IsFacility"])
