@@ -140,12 +140,15 @@ def geocode_addresses(addresses_df):
     # Load existing cache
     cache = load_geocode_cache()
     
+    # Load or initialize failed addresses log
+    failed_log = {}
+    
     # Filter out already geocoded addresses
     to_geocode = unique_addrs[~unique_addrs["addr_key"].isin(cache.keys())]
     
     if len(to_geocode) == 0:
         coords = [{"addr_key": k, "lat": v[0], "lon": v[1]} for k, v in cache.items()]
-        return pd.DataFrame(coords)
+        return pd.DataFrame(coords), failed_log
     
     # Initialize geocoder with longer timeout
     geolocator = Nominatim(user_agent="awo_entity_mapper", timeout=10)
@@ -156,6 +159,9 @@ def geocode_addresses(addresses_df):
     
     status_text.text(f"Geocoding {len(to_geocode)} new addresses...")
     
+    success_count = 0
+    fail_count = 0
+    
     for idx, (_, row) in enumerate(to_geocode.iterrows()):
         progress_bar.progress((idx + 1) / len(to_geocode))
         
@@ -163,24 +169,35 @@ def geocode_addresses(addresses_df):
             location = geocode(row["full_address"] + ", Germany")
             if location:
                 cache[row["addr_key"]] = (location.latitude, location.longitude)
+                success_count += 1
             else:
                 # Try without street if full address fails
                 simple_addr = f"{row['addr_key'].split('|')[0]} {row['addr_key'].split('|')[1]}, Germany"
                 location = geocode(simple_addr)
                 if location:
                     cache[row["addr_key"]] = (location.latitude, location.longitude)
-        except Exception:
+                    success_count += 1
+                else:
+                    failed_log[row["addr_key"]] = {"address": row["full_address"], "reason": "Not found"}
+                    fail_count += 1
+        except Exception as e:
+            failed_log[row["addr_key"]] = {"address": row["full_address"], "reason": str(e)}
+            fail_count += 1
             continue
     
     progress_bar.empty()
     status_text.empty()
+    
+    # Show summary
+    if success_count > 0 or fail_count > 0:
+        st.info(f"✓ Geocoded {success_count} | ✗ Failed {fail_count}")
     
     # Save final cache
     save_geocode_cache(cache)
     
     # Return all coords including cached ones
     all_coords = [{"addr_key": k, "lat": v[0], "lon": v[1]} for k, v in cache.items()]
-    return pd.DataFrame(all_coords)
+    return pd.DataFrame(all_coords), failed_log
 
 def get_entity_types(row):
     """Get list of entity types for a given entity."""
@@ -232,7 +249,7 @@ def main():
         return
     
     # Geocode with persistent caching (cached, runs once)
-    coords = geocode_addresses(addresses)
+    coords, failed_log = geocode_addresses(addresses)
     
     if len(coords) == 0:
         st.warning("No coordinates found for entities.")
