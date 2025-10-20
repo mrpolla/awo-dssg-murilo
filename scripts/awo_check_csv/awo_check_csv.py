@@ -16,10 +16,11 @@ import re
 import sys
 import time
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Set
 
-import requests
+import httpx
+import asyncio
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 from urllib.parse import urljoin
@@ -70,8 +71,11 @@ HEADERS_ROTATING = [
 ]
 
 EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", re.IGNORECASE)
-REQUEST_TIMEOUT = 15
-SAVE_INTERVAL = 5  # Save results every 5 entries
+REQUEST_TIMEOUT = 30
+SAVE_INTERVAL = 10  # Save results every 10 entries
+CONCURRENCY_LIMIT = 50  # how many sites at once
+
+
 
 # Street tokens
 STREET_TOKEN = r"(straße|strasse|str\.|weg|allee|platz|ufer|damm|gasse|ring|chaussee|steig|pfad|markt|berg)"
@@ -97,40 +101,61 @@ PLZ_ORT_ANYWHERE = re.compile(r"(?P<plz>\d{5})\s+(?P<ort>[A-ZÄÖÜ][\wÄÖÜä�
 def pick_headers() -> Dict[str, str]:
     return random.choice(HEADERS_ROTATING)
 
-def ensure_url(domain: str) -> Optional[str]:
+
+async def ensure_url(domain: str) -> Optional[str]:
+    """
+    Try both HTTPS and HTTP for incomplete URLs asynchronously.
+    Returns the first working URL or defaults to HTTPS if both fail.
+    """
     if not domain: return None
+    
     d = domain.strip()
+    
     if d.startswith("http://") or d.startswith("https://"): return d
+    
+    async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT, verify=False) as client:
+        for protocol, url in [("https", f"https://{d}"), ("http", f"http://{d}")]:
+            try:
+                r = await client.head(url, headers=pick_headers())
+                if 200 <= r.status_code < 400: return url
+                continue
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 405:
+                    try:
+                        async with client.stream("GET", url, headers=pick_headers()) as r:
+                            if 200 <= r.status_code < 400: return url
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    
     return f"https://{d}"
 
-def get(url: str) -> Optional[requests.Response]:
+
+# async_client = httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT)
+async def fetch(url: str):
+    """Fetch page HTML asynchronously with concurrency control."""
     try:
-        return requests.get(url, headers=pick_headers(), timeout=REQUEST_TIMEOUT, allow_redirects=True)
-    except requests.RequestException:
-        return None
+        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT, verify=False) as client:
+            r = await client.get(url, headers=pick_headers())
+            if r.status_code < 400:
+                return r
+    except httpx.InvalidURL as e:
+        print(f"Invalid URL skipped: {url} ({e})")
+    except httpx.RequestError as e:
+        print(f"Request failed: {url} ({e})")
+    except Exception as e:
+        # Catch-all for unexpected errors — optional but useful for debugging
+        print(f"Unexpected error with {url}: {type(e).__name__} -> {e}")
+    return None
 
-def head(url: str) -> Optional[requests.Response]:
-    try:
-        return requests.head(url, headers=pick_headers(), timeout=REQUEST_TIMEOUT, allow_redirects=True)
-    except requests.RequestException:
-        return None
-
-def site_reachable(url: str) -> Tuple[bool, Optional[str], Optional[int], Optional[str]]:
-    r = head(url)
-    if r is None or r.status_code >= 400 or r.status_code < 100:
-        r = get(url)
-    if r is None: return False, None, None, "no-response"
-    if 200 <= r.status_code < 400: return True, r.url, r.status_code, r.reason
-    return False, r.url, r.status_code, r.reason
-
-def html_of(url: str) -> Optional[BeautifulSoup]:
-    r = get(url)
-    if r is None or not r.ok or not r.text: return None
-    return BeautifulSoup(r.text, "lxml")
+async def html_of(url: str) -> Optional[BeautifulSoup]:
+    r = await fetch(url)
+    return BeautifulSoup(r.text, "lxml") if r else None
 
 # --------------- Candidate pages ---------------
 
-def find_candidate_pages(root_url: str, soup: Optional[BeautifulSoup]) -> Tuple[List[str], Optional[str], Optional[str]]:
+async def find_candidate_pages(root_url: str, soup: Optional[BeautifulSoup]) -> Tuple[List[str], Optional[str], Optional[str]]:
     """Return (pages_to_visit, impressum_url, kontakt_url)."""
     pages, seen = [root_url], {root_url}
     impressum_url, kontakt_url = None, None
@@ -150,13 +175,21 @@ def find_candidate_pages(root_url: str, soup: Optional[BeautifulSoup]) -> Tuple[
                 if full not in seen:
                     seen.add(full); pages.append(full); tag(full, text)
 
-    for path in COMMON_IMPRESSUM_PATHS + ["contact","kontakt-und-anfahrt","anfahrt","kontaktformular"]:
-        cand = urljoin(root_url if root_url.endswith("/") else root_url+"/", path)
-        r = head(cand)
+    tasks = [fetch(urljoin(root_url if root_url.endswith("/") else root_url+"/", path)) for path in COMMON_IMPRESSUM_PATHS + ["contact","kontakt-und-anfahrt","anfahrt","kontaktformular"]]
+    responses = await asyncio.gather(*tasks)
+    for r in responses:
         if r and 200 <= r.status_code < 400:
-            full = r.url
+            full = str(r.url)
             if full not in seen:
                 seen.add(full); pages.append(full); tag(full)
+
+    # for path in COMMON_IMPRESSUM_PATHS + ["contact","kontakt-und-anfahrt","anfahrt","kontaktformular"]:
+    #     cand = urljoin(root_url if root_url.endswith("/") else root_url+"/", path)
+    #     r = await fetch(cand)
+    #     if r and 200 <= r.status_code < 400:
+    #         full = str(r.url)
+    #         if full not in seen:
+    #             seen.add(full); pages.append(full); tag(full)
 
     return pages, impressum_url, kontakt_url
 
@@ -261,11 +294,10 @@ def extract_address_candidates_multistage(soup: BeautifulSoup, verbose: bool=Fal
     # --- Stage 4: PLZ/Ort line anywhere, search nearby lines (+/-3) for street+num anywhere
     if not candidates:
         stage = 4
-        for i, ln in enumerate(base):
-            m2 = PLZ_ORT_ANYWHERE.search(ln)
-            if not m2: continue
-            window = base[max(0, i-3):min(len(base), i+4)]
-            best = None
+        plz_matches = [(i, PLZ_ORT_ANYWHERE.search(ln)) for i, ln in enumerate(base) if PLZ_ORT_ANYWHERE.search(ln)]
+        for i, m2 in plz_matches:
+            window = base[max(0, i-3):i+4]
+
             for ln2 in window:
                 m1 = STREET_ANYWHERE_RELAX.search(ln2)
                 if m1:
@@ -401,6 +433,16 @@ def save_results_incremental(results_pairs: List[Tuple['InputRow', 'ResultRow']]
 
 # --------------- Core ---------------
 
+async def visit_page(page: str):
+    psoup = await html_of(page)
+    if not psoup:
+        return [], []
+
+    emails_here = extract_emails(psoup)
+    cands_here = await asyncio.to_thread(extract_address_candidates_multistage, psoup)
+    # cands_here = extract_address_candidates_multistage(psoup, verbose=True)
+    return cands_here, emails_here
+
 def pick_best_address(candidates: List[Dict[str,str]], seed: InputRow) -> Dict[str,str]:
     if not candidates:
         return {"street": None, "number": None, "plz": None, "ort": None, "_stage": None}
@@ -413,9 +455,11 @@ def pick_best_address(candidates: List[Dict[str,str]], seed: InputRow) -> Dict[s
         )
     return max(candidates, key=score)
 
-def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
-    input_url = ensure_url(row.domain) or ""
-    reachable, final_url, code, reason = site_reachable(input_url) if input_url else (False, None, None, "no-domain")
+async def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
+    input_url = await ensure_url(row.domain) or ""
+    html_response = await fetch(input_url) if input_url else None
+    reachable = bool(html_response)
+    # reachable, final_url, code, reason = site_reachable(input_url) if input_url else (False, None, None, "no-domain")
 
     found_emails: List[str] = []
     best_addr: Dict[str,str] = {"street": None, "number": None, "plz": None, "ort": None, "_stage": None}
@@ -428,42 +472,26 @@ def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
     score_ort = ""
     score_email = ""
 
-    if reachable and final_url:
-        soup = html_of(final_url)
-        if soup:
-            pages, impressum_url, kontakt_url = find_candidate_pages(final_url, soup)
-        else:
-            pages = [final_url]
+    if reachable and html_response:
+        soup = BeautifulSoup(html_response.text, "lxml")
+        pages, impressum_url, kontakt_url = await find_candidate_pages(input_url, soup)
 
         all_cands: List[Dict[str,str]] = []
-        print(f"  pages to visit: {pages}")
-        for u in pages:
-            print(f"    -> fetching: {u}")
-            psoup = html_of(u)
-            if not psoup: continue
-
-            # emails
-            emails_here = extract_emails(psoup)
-            if emails_here: print(f"       emails: {emails_here}")
-            found_emails = sorted(set(found_emails) | set(emails_here))
-
-            # multi-stage addresses
-            cands_here = extract_address_candidates_multistage(psoup, verbose=True)
-            if cands_here:
-                print(f"       address candidates: {cands_here}")
+        
+        tasks = [visit_page(p) for p in pages]
+        for task in asyncio.as_completed(tasks):
+            cands_here, emails_here = await task
             all_cands.extend(cands_here)
-            time.sleep(0.1)
+            found_emails = sorted(set(found_emails) | set(emails_here))
+            await asyncio.sleep(polite_delay) 
 
         best_addr = pick_best_address(all_cands, row)
-        print(f"  chosen best address (stage {best_addr.get('_stage')}): {{'street': {best_addr.get('street')}, 'number': {best_addr.get('number')}, 'plz': {best_addr.get('plz')}, 'ort': {best_addr.get('ort')}}}")
-        if impressum_url: print(f"  impressum_url: {impressum_url}")
-        if kontakt_url: print(f"  kontakt_url: {kontakt_url}")
-        time.sleep(polite_delay)
+
+
 
     notes_parts = []
     if not reachable:
         notes_parts.append("unreachable")
-        print(f"  site not reachable: {reason}")
     else:
         # choose best email for scoring (case-insensitive)
         best_email = ""
@@ -471,7 +499,7 @@ def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
             dom = row.domain.split("/")[0].lower()
             candidates_em = [e for e in found_emails if any(x in e for x in [dom, "awo"])]
             best_email = candidates_em[0] if candidates_em else found_emails[0]
-            print(f"  collected emails (deduped): {found_emails}")
+            # print(f"  collected emails (deduped): {found_emails}")
 
         score_street = score_similarity(row.strasse, best_addr.get("street") or "")
         score_number = score_similarity(row.hausnummer, best_addr.get("number") or "")
@@ -484,14 +512,14 @@ def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
         if not found_emails: notes_parts.append("no-email-found")
         if not best_addr.get("street") or not best_addr.get("plz"): notes_parts.append("address-incomplete")
 
-    return ResultRow(
+    return row, ResultRow(
         id=row.id,
         domain=row.domain,
         name=row.name,
         input_url=input_url,
         reachable=bool(reachable),
-        http_status=code,
-        reason=reason,
+        http_status=None,
+        reason=None,
         impressum_url=impressum_url,
         kontakt_url=kontakt_url,
         found_emails=";".join(found_emails),
@@ -507,9 +535,54 @@ def process_row(row: InputRow, polite_delay: float=5.0) -> ResultRow:
         notes=",".join(notes_parts),
     )
 
+
+
 # --------------- Main ---------------
 
-def main():
+async def worker(item, semaphore, delay):
+    async with semaphore:
+        return await process_row(item, delay)
+
+async def main(rows, batch_size, max_concurrency):
+    semaphore = asyncio.Semaphore(max_concurrency)
+    # Process rows with incremental saving
+    batch_results = []
+    total_processed = 0
+    
+    # Launch tasks
+    tasks = [asyncio.create_task(worker(item, semaphore, args.delay)) for item in rows]
+    
+    for i, task in enumerate(asyncio.as_completed(tasks), start=1):
+        # print(f"[{i}/{len(rows)}]")
+        result = await task
+        batch_results.append(result)
+
+            
+        # Save every SAVE_INTERVAL results or at the end
+        if len(batch_results) >= batch_size or i == len(rows_to_process):
+
+            print(f"\n--- Saving batch of {len(batch_results)} results to {args.output} ---")
+            
+            # Determine if we should append (when resuming) or overwrite
+            append_mode = not (args.force and total_processed == len(batch_results))
+            
+            save_results_incremental(batch_results, args.output, append=append_mode)
+            total_processed += len(batch_results)
+            print(f"Saved {len(batch_results)} results (total processed in this session: {total_processed})")
+            batch_results = []  # Clear the batch
+
+            
+
+    print(f"\nCompleted! Processed {total_processed} new entries in this session.")
+    
+    # Final summary
+    if os.path.exists(args.output):
+        total_in_file = sum(1 for _ in open(args.output, 'r', encoding='utf-8')) - 1  # -1 for header
+        print(f"Total entries now in {args.output}: {total_in_file}")
+        
+
+if __name__ == "__main__":
+    start = time.time()
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="data/input/AWO_domains_with_impressum_data.csv", help="Seed CSV (default: data/demo_seed.csv)")
     ap.add_argument("--output", default="data/output/scraped_results.csv", help="Results CSV")
@@ -546,73 +619,9 @@ def main():
 
     if not rows_to_process:
         print("No new rows to process. All entries are already completed!")
-        return
+    else:
 
-    # Process rows with incremental saving
-    batch_results = []
-    total_processed = 0
-    
-    for i, r in enumerate(rows_to_process, 1):
-        print(f"[{i}/{len(rows_to_process)}] Checking {r.domain} ...")
-        try:
-            res = process_row(r, polite_delay=args.delay)
-            batch_results.append((r, res))
-            total_processed += 1
-            
-            # Save every SAVE_INTERVAL results or at the end
-            if len(batch_results) >= SAVE_INTERVAL or i == len(rows_to_process):
-                print(f"\n--- Saving batch of {len(batch_results)} results to {args.output} ---")
-                
-                # Determine if we should append (when resuming) or overwrite
-                append_mode = not (args.force and total_processed == len(batch_results))
-                
-                save_results_incremental(batch_results, args.output, append=append_mode)
-                print(f"Saved {len(batch_results)} results (total processed in this session: {total_processed})")
-                batch_results = []  # Clear the batch
-                
-        except Exception as e:
-            print(f"  -> ERROR on {r.domain}: {e}", file=sys.stderr)
-            res = ResultRow(
-                id=r.id,
-                domain=r.domain,
-                name=r.name,
-                input_url=ensure_url(r.domain) or "",
-                reachable=False,
-                http_status=None,
-                reason="exception",
-                found_street=None,
-                found_number=None,
-                found_plz=None,
-                found_ort=None,
-                impressum_url=None,
-                kontakt_url=None,
-                score_street=0,
-                score_number=0,
-                score_plz=0,
-                score_ort=0,
-                score_email=0,
-                notes="exception",
-                found_emails=""
-            )
-            batch_results.append((r, res))
-            total_processed += 1
-            
-            # Save even after errors, same logic as above
-            if len(batch_results) >= SAVE_INTERVAL or i == len(rows_to_process):
-                print(f"\n--- Saving batch of {len(batch_results)} results to {args.output} ---")
-                append_mode = not (args.force and total_processed == len(batch_results))
-                save_results_incremental(batch_results, args.output, append=append_mode)
-                print(f"Saved {len(batch_results)} results (total processed in this session: {total_processed})")
-                batch_results = []
-                
-        time.sleep(0.2)
+        asyncio.run(main(rows_to_process, batch_size=SAVE_INTERVAL, max_concurrency=CONCURRENCY_LIMIT))
+    end = time.time()
 
-    print(f"\nCompleted! Processed {total_processed} new entries in this session.")
-    
-    # Final summary
-    if os.path.exists(args.output):
-        total_in_file = sum(1 for _ in open(args.output, 'r', encoding='utf-8')) - 1  # -1 for header
-        print(f"Total entries now in {args.output}: {total_in_file}")
-
-if __name__ == "__main__":
-    main()
+print(f"Execution time: {end - start:.4f} seconds")
