@@ -114,6 +114,18 @@ D1 --> N1
 
 ---
 
+```mermaid
+flowchart TD
+    A["📥 Data Cleaning"] -->|input: raw CSVs| B["🧹 Standardize Data"]
+    B -->|output: cleaned CSVs| C["📍 Geocoding"]
+    C --> D["🌐 Web Scraping"]
+    D --> E["🔍 Comparison & Reports"]
+
+    click A "cleaning.md" "Open cleaning details"
+    click C "geocoding.md" "Open geocoding subtasks"
+    click D "scraping.md" "Open scraping subtasks"
+```
+
 ## 3️⃣ Data Model (Final Database)
 
 Below is a simplified ER diagram showing the final database structure after cleaning, geocoding, and enrichment.
@@ -212,18 +224,18 @@ erDiagram
 
 ## 4️⃣ Summary
 
-| Component | Description |
-|------------|--------------|
-| **data/raw/** | Original AWO tables as provided |
-| **data/cleaned/** | Standardized and cleaned versions |
-| **data/geocoded/** | Address data enriched with latitude/longitude |
-| **data/scraped/** | Scraped information from AWO websites |
-| **data/comparison/** | Reports showing mismatches and outdated info |
-| **data/final/** | Final deliverables – ready for integration |
-| **src/utils/** | Python helper functions used by notebooks & scripts |
-| **src/pipelines/** | Reproducible step-by-step processing scripts |
-| **src/notebooks/** | Jupyter notebooks for documentation and analysis |
+| Component            | Description                                         |
+| -------------------- | --------------------------------------------------- |
+| **data/raw/**        | Original AWO tables as provided                     |
+| **data/cleaned/**    | Standardized and cleaned versions                   |
+| **data/geocoded/**   | Address data enriched with latitude/longitude       |
+| **data/scraped/**    | Scraped information from AWO websites               |
+| **data/comparison/** | Reports showing mismatches and outdated info        |
+| **data/final/**      | Final deliverables – ready for integration          |
+| **src/utils/**       | Python helper functions used by notebooks & scripts |
+| **src/pipelines/**   | Reproducible step-by-step processing scripts        |
+| **src/notebooks/**   | Jupyter notebooks for documentation and analysis    |
 
 ---
 
-📘 *This architecture ensures transparency, modularity, and reproducibility for all contributors — whether they work in notebooks, scripts, or data analysis.*
+📘 _This architecture ensures transparency, modularity, and reproducibility for all contributors — whether they work in notebooks, scripts, or data analysis._
